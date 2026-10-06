@@ -47,3 +47,19 @@ async def test_stale_albums():
         await rc.stale_albums(gp2, [(1, "x")])
     await gp.aclose()
     await gp2.aclose()
+
+
+async def test_duplicate_ids_are_sent_once():
+    sent = []
+
+    def handler(url, params):
+        ids = [v for _, v in params]
+        assert len(ids) == len(set(ids)), "Request must not contain duplicated ids."
+        sent.extend(ids)
+        return httpx.Response(200, json={"mediaItemResults": [
+            {"status": {"code": 3}} if m == "gone" else {"mediaItem": {"id": m}} for m in ids]})
+
+    gp = _gp(handler)
+    assert await rc.missing_ids(gp, ["a", "gone", "a", "b", "gone"]) == ["gone"]
+    await gp.aclose()
+    assert sent == ["a", "gone", "b"]
