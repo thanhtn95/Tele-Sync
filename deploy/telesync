@@ -4,6 +4,7 @@
 #   sudo telesync password      set the web login
 #   sudo telesync tg-login      one-time Telegram login (phone + code)
 #   sudo telesync gphotos-auth  link Google Photos
+#   sudo telesync gphotos-recheck  re-upload items missing from the linked account
 #   sudo telesync restart | status | logs
 set -euo pipefail
 
@@ -36,6 +37,10 @@ case "$cmd" in
     need_root gphotos-auth
     run_py scripts.gphotos_auth "$@" && restart
     ;;
+  gphotos-recheck)
+    need_root gphotos-recheck
+    run_py scripts.gphotos_recheck "$@" && restart
+    ;;
   restart)
     need_root restart
     restart
@@ -47,6 +52,6 @@ case "$cmd" in
     journalctl -u telesync -n "${1:-50}" --no-pager
     ;;
   *)
-    sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
     ;;
 esac

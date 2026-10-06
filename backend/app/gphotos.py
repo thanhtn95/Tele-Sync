@@ -28,6 +28,23 @@ VIDEO_MAX_BYTES = 20 * 1024 * 1024 * 1024
 URL_TTL_SECONDS = 45 * 60
 
 
+DESCRIPTION_MAX_BYTES = 1000
+
+
+def clip_description(text: str) -> str:
+    """Fit Google's 1000-character description limit.
+
+    Google counts more strictly than Python characters (Vietnamese letters and emoji
+    were rejected at 1000 chars), so clip by UTF-8 bytes, which is never smaller than
+    any character count.
+    """
+    text = text or ""
+    if len(text.encode()) <= DESCRIPTION_MAX_BYTES:
+        return text
+    cut = text.encode()[: DESCRIPTION_MAX_BYTES - 3].decode(errors="ignore")
+    return cut.rstrip() + "…"
+
+
 class GPhotosError(Exception):
     pass
 
@@ -127,37 +144,51 @@ class GPhotos:
     ) -> list[CreateResult]:
         """Step 2: turn upload tokens into media items. items = [(upload_token, description)].
 
-        Handles HTTP 207 (partial success): each item gets its own result.
+        Handles HTTP 207 (partial success): each item gets its own result. A 400 rejects
+        the whole request, so a failed multi-item batch is retried item by item; a single
+        item rejected for its description is retried without one.
         """
         results: list[CreateResult] = []
         for i in range(0, len(items), BATCH_LIMIT):
-            chunk = items[i : i + BATCH_LIMIT]
-            body: dict = {
-                "newMediaItems": [
-                    {"description": desc[:1000], "simpleMediaItem": {"uploadToken": tok}}
-                    for tok, desc in chunk
-                ]
-            }
-            if album_id:
-                body["albumId"] = album_id
-            r = await self._request("POST", f"{API}/mediaItems:batchCreate", json=body)
-            if r.status_code not in (200, 207):
-                err = f"batchCreate {r.status_code}: {r.text[:300]}"
-                results.extend(CreateResult(tok, None, err) for tok, _ in chunk)
-                continue
-            by_token = {res.get("uploadToken"): res for res in r.json().get("newMediaItemResults", [])}
-            for tok, _ in chunk:
-                res = by_token.get(tok)
-                if res is None:
-                    results.append(CreateResult(tok, None, "missing in batchCreate response"))
-                    continue
-                status = res.get("status") or {}
-                item = res.get("mediaItem")
-                if item and item.get("id") and not status.get("code"):
-                    results.append(CreateResult(tok, item["id"], None))
-                else:
-                    results.append(CreateResult(tok, None, status.get("message") or "unknown error"))
+            results.extend(await self._create_chunk(items[i : i + BATCH_LIMIT], album_id))
         return results
+
+    async def _create_chunk(self, chunk: list[tuple[str, str]], album_id: str | None) -> list[CreateResult]:
+        body: dict = {
+            "newMediaItems": [
+                {"description": clip_description(desc), "simpleMediaItem": {"uploadToken": tok}}
+                for tok, desc in chunk
+            ]
+        }
+        if album_id:
+            body["albumId"] = album_id
+        r = await self._request("POST", f"{API}/mediaItems:batchCreate", json=body)
+        if r.status_code == 400:
+            if len(chunk) > 1:
+                out: list[CreateResult] = []
+                for item in chunk:
+                    out.extend(await self._create_chunk([item], album_id))
+                return out
+            tok, desc = chunk[0]
+            if desc and "description" in r.text.lower():
+                return await self._create_chunk([(tok, "")], album_id)
+        if r.status_code not in (200, 207):
+            err = f"batchCreate {r.status_code}: {r.text[:300]}"
+            return [CreateResult(tok, None, err) for tok, _ in chunk]
+        by_token = {res.get("uploadToken"): res for res in r.json().get("newMediaItemResults", [])}
+        out = []
+        for tok, _ in chunk:
+            res = by_token.get(tok)
+            if res is None:
+                out.append(CreateResult(tok, None, "missing in batchCreate response"))
+                continue
+            status = res.get("status") or {}
+            item = res.get("mediaItem")
+            if item and item.get("id") and not status.get("code"):
+                out.append(CreateResult(tok, item["id"], None))
+            else:
+                out.append(CreateResult(tok, None, status.get("message") or "unknown error"))
+        return out
 
     async def create_album(self, title: str) -> str:
         r = await self._request("POST", f"{API}/albums", json={"album": {"title": title[:500]}})
