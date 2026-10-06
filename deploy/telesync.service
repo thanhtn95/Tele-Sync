@@ -1,0 +1,29 @@
+[Unit]
+Description=Telegram Archiver (FastAPI + sync worker)
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=telesync
+Group=telesync
+WorkingDirectory=/opt/tele-sync/backend
+EnvironmentFile=/opt/tele-sync/.env
+# One process, one worker: the sync loop lives inside it (no Celery on a 1 GB VM).
+ExecStart=/opt/tele-sync/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers
+Restart=on-failure
+RestartSec=10
+# Files must be group-readable so nginx (www-data, in the files dir group) can serve them.
+UMask=0027
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/tele-sync
+MemoryHigh=450M
+MemoryMax=600M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,31 @@
+async function request(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      detail = (await res.json()).detail ?? detail;
+    } catch {
+      /* not JSON */
+    }
+    throw new Error(`${res.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
+  }
+  return res.json();
+}
+
+export const api = {
+  dialogs: (refresh = false) => request('GET', `/api/dialogs${refresh ? '?refresh=true' : ''}`),
+  chat: (id) => request('GET', `/api/chats/${id}`),
+  patchChat: (id, patch) => request('PATCH', `/api/chats/${id}`, patch),
+  messages: (id, before, limit = 50) =>
+    request('GET', `/api/chats/${id}/messages?limit=${limit}${before != null ? `&before=${before}` : ''}`),
+  gphotosUrls: (mediaIds, force = false) => request('POST', '/api/gphotos/urls', { media_ids: mediaIds, force }),
+  syncStatus: () => request('GET', '/api/sync/status'),
+  syncRun: () => request('POST', '/api/sync/run'),
+};
+
+/** URL for a file stored on the VM disk (served by nginx). */
+export const fileUrl = (path) => '/files/' + path.split('/').map(encodeURIComponent).join('/');
