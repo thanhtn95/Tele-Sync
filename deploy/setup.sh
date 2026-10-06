@@ -94,6 +94,9 @@ systemctl reload nginx
 systemctl enable telesync
 systemctl restart telesync
 
+echo "== admin command (sudo telesync ...)"
+install -m 755 "$APP/deploy/telesync" /usr/local/bin/telesync
+
 echo "== web login"
 if ! grep -qE '^WEB_PASSWORD_HASH=\S' "$APP/.env"; then
   if [[ -t 0 ]]; then
@@ -101,7 +104,7 @@ if ! grep -qE '^WEB_PASSWORD_HASH=\S' "$APP/.env"; then
     (cd "$APP/backend" && "$APP/venv/bin/python" -m scripts.set_password)
     systemctl restart telesync
   else
-    echo "!! No web login set. Run: cd $APP/backend && sudo ../venv/bin/python -m scripts.set_password"
+    echo "!! No web login set. Run: sudo telesync password"
   fi
 fi
 
@@ -111,15 +114,11 @@ echo "17 3 * * * telesync /usr/local/bin/telesync-backup >> $DATA/backups/backup
 
 cat <<MSG
 
-Done. Remaining manual steps:
-  0. Change web login any time:
-       cd $APP/backend && sudo ../venv/bin/python -m scripts.set_password && sudo systemctl restart telesync
-  1. Edit $APP/.env: TG_API_ID, TG_API_HASH, Google OAuth values, GCS_BUCKET.
-  2. Telegram login (creates the session file, interactive):
-       cd $APP/backend && sudo -u telesync $APP/venv/bin/python -m scripts.tg_login
-       sudo systemctl restart telesync
-  3. Google refresh token (see README), then: sudo systemctl restart telesync
-  4. Tailscale:  sudo tailscale up --ssh
-                 sudo tailscale serve --bg 8080
+Done. Remaining steps (each is one command):
+  1. sudo telesync config         # Telegram api_id/api_hash, Google client id/secret, backup bucket
+  2. sudo telesync tg-login       # phone number + code from your Telegram app
+  3. sudo telesync gphotos-auth   # link Google Photos (optional)
+  4. sudo tailscale up --ssh && sudo tailscale serve --bg 8080
      -> open https://<vm-name>.<tailnet>.ts.net from any device on your tailnet.
+Other: sudo telesync password | restart | status | logs
 MSG

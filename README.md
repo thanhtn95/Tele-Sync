@@ -98,22 +98,21 @@ nightly `pg_dump` cron (03:17 UTC, uploads to `GCS_BUCKET` if set). Re-run it to
 updates. If `npm` struggles on the VM, run `npm ci && npm run build` in `frontend/`
 locally first; `setup.sh` uses an existing `frontend/dist`.
 
-Then:
+Then, on the VM (`setup.sh` installs the `telesync` admin command):
 
 ```bash
-sudo nano /opt/tele-sync/.env                         # TG_*, GOOGLE_CLIENT_*, GCS_BUCKET
-cd /opt/tele-sync/backend && sudo ../venv/bin/python -m scripts.set_password   # web login (setup.sh asks once)
-cd /opt/tele-sync/backend
-sudo -u telesync /opt/tele-sync/venv/bin/python -m scripts.tg_login   # phone, code, 2FA
-sudo ../venv/bin/python -m scripts.gphotos_auth      # saves GOOGLE_REFRESH_TOKEN into .env
-#   open the printed link on any device (phone OK), allow access, then copy the address of the
-#   page that fails to load (http://localhost:8765/?code=...) and paste it into the terminal
-sudo systemctl restart telesync
+sudo telesync config        # asks for TG api_id/api_hash, Google client id/secret, backup bucket...
+                            #   Enter keeps a value, '-' clears it; offers to restart the app
+sudo telesync tg-login      # one-time Telegram login: phone, code from the Telegram app, 2FA
+sudo telesync gphotos-auth  # link Google Photos: open the link (phone OK), allow, then paste the
+                            #   address of the page that fails to load (http://localhost:8765/?code=...)
+sudo telesync password      # change the web login
 sudo tailscale up --ssh
 sudo tailscale serve --bg 8080                        # https://<vm>.<tailnet>.ts.net
 ```
 
-Logs: `journalctl -u telesync -f`.
+`sudo telesync restart | status | logs` for day-to-day checks.
+
 
 ### Security notes
 
