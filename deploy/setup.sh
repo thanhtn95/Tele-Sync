@@ -94,6 +94,17 @@ systemctl reload nginx
 systemctl enable telesync
 systemctl restart telesync
 
+echo "== web login"
+if ! grep -qE '^WEB_PASSWORD_HASH=\S' "$APP/.env"; then
+  if [[ -t 0 ]]; then
+    echo "Choose the username/password for the web app:"
+    (cd "$APP/backend" && "$APP/venv/bin/python" -m scripts.set_password)
+    systemctl restart telesync
+  else
+    echo "!! No web login set. Run: cd $APP/backend && sudo ../venv/bin/python -m scripts.set_password"
+  fi
+fi
+
 echo "== nightly backup (03:17 UTC)"
 install -m 755 "$APP/deploy/backup.sh" /usr/local/bin/telesync-backup
 echo "17 3 * * * telesync /usr/local/bin/telesync-backup >> $DATA/backups/backup.log 2>&1" > /etc/cron.d/telesync-backup
@@ -101,6 +112,8 @@ echo "17 3 * * * telesync /usr/local/bin/telesync-backup >> $DATA/backups/backup
 cat <<MSG
 
 Done. Remaining manual steps:
+  0. Change web login any time:
+       cd $APP/backend && sudo ../venv/bin/python -m scripts.set_password && sudo systemctl restart telesync
   1. Edit $APP/.env: TG_API_ID, TG_API_HASH, Google OAuth values, GCS_BUCKET.
   2. Telegram login (creates the session file, interactive):
        cd $APP/backend && sudo -u telesync $APP/venv/bin/python -m scripts.tg_login

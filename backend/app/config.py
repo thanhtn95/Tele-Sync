@@ -33,6 +33,13 @@ class Settings:
     temp_dir: Path
     sync_interval_seconds: int
     max_file_bytes: int
+    web_username: str
+    web_password_hash: str
+    session_secret: str
+
+    @property
+    def auth_enabled(self) -> bool:
+        return bool(self.web_password_hash)
 
     @property
     def gphotos_enabled(self) -> bool:
@@ -53,6 +60,9 @@ def load_settings() -> Settings:
         temp_dir=_path("TEMP_DIR", "./data/tmp"),
         sync_interval_seconds=int(os.environ.get("SYNC_INTERVAL_SECONDS") or 1800),
         max_file_bytes=max_mb * 1024 * 1024,
+        web_username=os.environ.get("WEB_USERNAME") or "admin",
+        web_password_hash=os.environ.get("WEB_PASSWORD_HASH", ""),
+        session_secret=os.environ.get("SESSION_SECRET", ""),
     )
 
 

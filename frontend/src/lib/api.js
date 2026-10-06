@@ -4,6 +4,9 @@ async function request(method, path, body) {
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 401 && !path.startsWith('/api/auth/')) {
+    window.dispatchEvent(new Event('auth:required')); // session expired -> App shows the login form
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try {
@@ -17,6 +20,9 @@ async function request(method, path, body) {
 }
 
 export const api = {
+  me: () => request('GET', '/api/auth/me'),
+  login: (username, password) => request('POST', '/api/auth/login', { username, password }),
+  logout: () => request('POST', '/api/auth/logout'),
   dialogs: (refresh = false) => request('GET', `/api/dialogs${refresh ? '?refresh=true' : ''}`),
   chat: (id) => request('GET', `/api/chats/${id}`),
   patchChat: (id, patch) => request('PATCH', `/api/chats/${id}`, patch),
