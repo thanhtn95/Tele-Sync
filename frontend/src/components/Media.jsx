@@ -56,11 +56,13 @@ function aspectStyle(media, fill) {
 }
 
 function Missing({ media }) {
-  const why = media.error?.startsWith('skipped:')
-    ? media.error.slice(8).trim()
-    : media.error
-      ? 'Download failed'
-      : 'Not downloaded';
+  const why = media.gphotos_media_id
+    ? 'Not found in the linked Google Photos account'
+    : media.error?.startsWith('skipped:')
+      ? media.error.slice(8).trim()
+      : media.error
+        ? 'Download failed'
+        : 'Not downloaded yet';
   return (
     <div className="media-missing" title={media.error || ''}>
       {why}

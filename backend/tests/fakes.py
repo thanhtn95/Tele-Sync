@@ -119,6 +119,7 @@ class FakeGPhotos:
         self.created: list[tuple[list, str | None]] = []
         self.albums: list[str] = []
         self.fail_tokens: set[str] = set()
+        self.fail_all = False
 
     async def upload(self, path: Path, mime: str) -> str:
         assert path.exists()
@@ -129,7 +130,8 @@ class FakeGPhotos:
     async def batch_create(self, items, album_id=None):
         self.created.append((items, album_id))
         return [
-            CreateResult(t, None, "boom") if t in self.fail_tokens else CreateResult(t, f"gp-{t}", None)
+            CreateResult(t, None, "boom") if self.fail_all or t in self.fail_tokens
+            else CreateResult(t, f"gp-{t}", None)
             for t, _ in items
         ]
 

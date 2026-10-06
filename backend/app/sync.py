@@ -422,31 +422,39 @@ class SyncWorker:
                 await self._set_media(ctx.chat_id, p.message_id, error=(res.error or "unknown")[:500])
 
     async def _retry_media(self, entity, ctx: "_ChatCtx") -> None:
-        """Retry failed downloads/uploads and backfill media synced while sync_media was off."""
-        rows = await self.pool.fetch(
-            """
-            SELECT message_id FROM media
-            WHERE chat_id = $1 AND gphotos_media_id IS NULL AND file_path IS NULL
-              AND (error IS NULL OR error NOT LIKE 'skipped:%')
-            ORDER BY message_id LIMIT $2
-            """,
-            ctx.chat_id, RETRY_LIMIT,
-        )
-        if not rows:
-            return
-        ids = [r["message_id"] for r in rows]
-        msgs = await self.client.get_messages(entity, ids=ids)
-        for mid, msg in zip(ids, msgs):
-            if msg is None:
-                await self._set_media(ctx.chat_id, mid, error="skipped: message no longer exists")
-                continue
-            info = classify(msg)
-            if info is None:
-                await self._set_media(ctx.chat_id, mid, error="skipped: media no longer available")
-                continue
-            await self._save_media_meta(ctx.chat_id, mid, info)
-            await self._store_media(msg, info, ctx)
-        await self._flush_uploads(ctx)
+        """Retry failed downloads/uploads and backfill media synced while sync_media was off.
+
+        Walks all pending rows once per pass, RETRY_LIMIT at a time; anything that fails
+        again is left for the next pass.
+        """
+        after = 0
+        while True:
+            rows = await self.pool.fetch(
+                """
+                SELECT message_id FROM media
+                WHERE chat_id = $1 AND message_id > $3
+                  AND gphotos_media_id IS NULL AND file_path IS NULL
+                  AND (error IS NULL OR error NOT LIKE 'skipped:%')
+                ORDER BY message_id LIMIT $2
+                """,
+                ctx.chat_id, RETRY_LIMIT, after,
+            )
+            if not rows:
+                break
+            ids = [r["message_id"] for r in rows]
+            after = ids[-1]
+            msgs = await self._flood_retry(lambda: self.client.get_messages(entity, ids=ids), ctx.chat_id)
+            for mid, msg in zip(ids, msgs):
+                if msg is None:
+                    await self._set_media(ctx.chat_id, mid, error="skipped: message no longer exists")
+                    continue
+                info = classify(msg)
+                if info is None:
+                    await self._set_media(ctx.chat_id, mid, error="skipped: media no longer available")
+                    continue
+                await self._save_media_meta(ctx.chat_id, mid, info)
+                await self._store_media(msg, info, ctx)
+            await self._flush_uploads(ctx)
 
 
 class _ChatCtx:
