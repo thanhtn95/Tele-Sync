@@ -10,6 +10,7 @@ from pathlib import Path
 import asyncpg
 from telethon import TelegramClient, utils
 from telethon.errors import FloodWaitError
+from telethon.tl.types import InputMessagesFilterPinned
 
 from .config import Settings
 from .gphotos import PHOTO_MAX_BYTES, VIDEO_MAX_BYTES, GPhotos
@@ -187,7 +188,46 @@ class SyncWorker:
                 self.state.flood_wait_until = _now() + dt.timedelta(seconds=e.seconds)
                 await asyncio.sleep(e.seconds + 1)
                 self.state.flood_wait_until = None
+        await self._flood_retry(lambda: self._sync_pins(entity, ctx), chat_id)
         await self._checkpoint(ctx, cursor, finished=True)
+
+    async def _flood_retry(self, fn, chat_id: int, attempts: int = 3):
+        for attempt in range(attempts):
+            try:
+                return await fn()
+            except FloodWaitError as e:
+                if attempt == attempts - 1:
+                    raise
+                log.warning("FloodWait %ss on chat %s", e.seconds, chat_id)
+                self.state.flood_wait_until = _now() + dt.timedelta(seconds=e.seconds)
+                await asyncio.sleep(e.seconds + 1)
+                self.state.flood_wait_until = None
+
+    async def _sync_pins(self, entity, ctx: "_ChatCtx") -> None:
+        """Mirror Telegram's current pinned set (pins/unpins of old messages included).
+
+        Pinned messages not yet archived (e.g. older than sync_since) are saved too,
+        so the pinned bar can always show them.
+        """
+        pinned = [m async for m in self.client.iter_messages(entity, filter=InputMessagesFilterPinned)]
+        ids = [m.id for m in pinned]
+        have = {
+            r["message_id"]
+            for r in await self.pool.fetch(
+                "SELECT message_id FROM messages WHERE chat_id = $1 AND message_id = ANY($2::bigint[])",
+                ctx.chat_id, ids,
+            )
+        }
+        for m in pinned:
+            if m.id not in have:
+                await self.process_message(m, ctx)
+        await self.pool.execute(
+            """
+            UPDATE messages SET pinned = (message_id = ANY($2::bigint[]))
+            WHERE chat_id = $1 AND (pinned OR message_id = ANY($2::bigint[]))
+            """,
+            ctx.chat_id, ids,
+        )
 
     async def _checkpoint(self, ctx: "_ChatCtx", cursor: int, finished: bool = False) -> bool:
         """Flush pending uploads, persist cursor. Returns False if the chat got disabled."""
@@ -218,18 +258,18 @@ class SyncWorker:
         await self.pool.execute(
             """
             INSERT INTO messages (chat_id, message_id, sender_id, date, text, reply_to,
-                                  grouped_id, fwd_from_name, edit_date, raw, out)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                                  grouped_id, fwd_from_name, edit_date, raw, out, pinned)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (chat_id, message_id) DO UPDATE SET
               sender_id = EXCLUDED.sender_id, date = EXCLUDED.date, text = EXCLUDED.text,
               reply_to = EXCLUDED.reply_to, grouped_id = EXCLUDED.grouped_id,
               fwd_from_name = EXCLUDED.fwd_from_name, edit_date = EXCLUDED.edit_date,
-              raw = EXCLUDED.raw, out = EXCLUDED.out
+              raw = EXCLUDED.raw, out = EXCLUDED.out, pinned = EXCLUDED.pinned
             """,
             chat_id, msg.id, msg.sender_id, msg.date,
             text.replace("\x00", "") if text else text,
             msg.reply_to_msg_id, msg.grouped_id, fwd_name(msg), msg.edit_date,
-            raw, bool(msg.out),
+            raw, bool(msg.out), bool(getattr(msg, "pinned", False)),
         )
 
     async def _upsert_sender(self, msg) -> None:

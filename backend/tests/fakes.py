@@ -76,7 +76,12 @@ class FakeTG(TelegramClient):
     async def get_input_entity(self, peer):
         return types.InputPeerChannel(CHANNEL_RAW, 42)
 
-    async def iter_messages(self, entity, min_id=0, reverse=False, offset_date=None, **kw):
+    async def iter_messages(self, entity, min_id=0, reverse=False, offset_date=None, filter=None, **kw):
+        if filter is types.InputMessagesFilterPinned or isinstance(filter, types.InputMessagesFilterPinned):
+            for m in sorted(self.messages, key=lambda m: -m.id):  # newest first, like Telegram
+                if getattr(m, "pinned", False):
+                    yield m
+            return
         assert reverse
         n = 0
         for m in sorted(self.messages, key=lambda m: m.id):
