@@ -351,6 +351,64 @@ async def get_messages(
     return {"messages": [_message_out(r) for r in rows[:limit]], "has_more": has_more, "has_newer": False}
 
 
+def _like_escape(q: str) -> str:
+    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+@app.get("/api/chats/{chat_id}/search")
+async def search_chat(
+    chat_id: int,
+    q: str = Query(..., min_length=1, max_length=200),
+    before: int | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    pool=Depends(pool_dep),
+):
+    """Messages whose text, caption or file name contains q, ignoring case and accents.
+
+    Newest first; ?before=<id> pages older. `total` is only computed on the first page.
+    """
+    q = q.strip()
+    if not q:
+        raise HTTPException(422, "empty query")
+    pattern = "%" + _like_escape(q) + "%"
+    match = (
+        "(fold_text(m.text) LIKE fold_text($2) ESCAPE '\\' "
+        "OR fold_text(md.file_name) LIKE fold_text($2) ESCAPE '\\')"
+    )
+    rows = await pool.fetch(
+        f"""
+        SELECT m.message_id, m.date, left(m.text, 1000) AS text, u.name AS sender_name,
+               md.kind AS media_kind, md.file_name
+        FROM messages m
+        LEFT JOIN media md ON md.chat_id = m.chat_id AND md.message_id = m.message_id
+        LEFT JOIN users u ON u.user_id = m.sender_id
+        WHERE m.chat_id = $1 AND {match} AND ($3::bigint IS NULL OR m.message_id < $3)
+        ORDER BY m.message_id DESC
+        LIMIT $4
+        """,
+        chat_id, pattern, before, limit + 1,
+    )
+    total = None
+    if before is None:
+        total = await pool.fetchval(
+            f"""
+            SELECT count(*) FROM messages m
+            LEFT JOIN media md ON md.chat_id = m.chat_id AND md.message_id = m.message_id
+            WHERE m.chat_id = $1 AND {match}
+            """,
+            chat_id, pattern,
+        )
+    return {
+        "results": [
+            {"id": r["message_id"], "date": r["date"], "text": r["text"], "sender_name": r["sender_name"],
+             "media_kind": r["media_kind"], "file_name": r["file_name"]}
+            for r in rows[:limit]
+        ],
+        "has_more": len(rows) > limit,
+        "total": total,
+    }
+
+
 MEDIA_GROUPS = {
     "media": ("photo", "video", "gif"),
     "files": ("document", "audio"),

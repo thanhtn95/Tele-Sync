@@ -1138,3 +1138,111 @@ button.primary {
   text-align: center;
   font-size: 14px;
 }
+
+/* ---------- in-chat search ---------- */
+.chat-header .search-btn {
+  margin-left: auto;
+}
+.chat-header .search-btn + .theme-btn {
+  margin-left: 0;
+}
+.chat-header.search-mode {
+  flex-wrap: wrap;
+  gap: 0;
+  padding: 6px 8px;
+  position: relative;
+}
+.search-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+.search-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  padding: 8px 14px;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+}
+.search-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  padding: 4px 4px 0 44px;
+}
+.search-count {
+  flex: 1;
+  color: var(--muted);
+  font-size: 14px;
+}
+.search-nav .icon-btn {
+  font-size: 16px;
+  padding: 6px 10px;
+}
+.search-nav .icon-btn:disabled {
+  opacity: 0.3;
+}
+.search-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  /* Reaches past the screen bottom; the padding keeps the last rows scrollable into view. */
+  height: 100vh;
+  height: 100dvh;
+  padding-bottom: 140px;
+  box-sizing: border-box;
+  overflow-y: auto;
+  background: var(--panel);
+  z-index: 20;
+  border-top: 1px solid var(--border);
+}
+.search-list ul {
+  list-style: none;
+  margin: 0 auto;
+  padding: 0;
+  max-width: 760px;
+}
+.search-list li button {
+  width: 100%;
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  border: none;
+  border-radius: 0;
+  background: none;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.search-list li button:hover,
+.search-list li button.current {
+  background: var(--hover);
+}
+.search-row-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.search-snippet {
+  font-size: 14px;
+  color: var(--muted);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.search-more {
+  display: block;
+  margin: 12px auto;
+}
+mark.hl {
+  background: #ffd84d;
+  color: #000;
+  border-radius: 2px;
+  padding: 0 1px;
+}

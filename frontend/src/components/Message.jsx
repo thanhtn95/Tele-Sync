@@ -68,7 +68,7 @@ function AlbumGrid({ msgs, onOpen }) {
 /**
  * One bubble. `msgs` has several entries for an album (same grouped_id).
  */
-export default function MessageBubble({ msgs, showName, showAvatar, isGroup, highlighted, onJump, onOpen }) {
+export default function MessageBubble({ msgs, showName, showAvatar, isGroup, highlighted, onJump, onOpen, query }) {
   const first = msgs[0];
   const last = msgs[msgs.length - 1];
 
@@ -131,7 +131,7 @@ export default function MessageBubble({ msgs, showName, showAvatar, isGroup, hig
         {otherLabel && <div className="other-media">{otherLabel}</div>}
         {captioned.text && (
           <div className="text">
-            <RichText text={captioned.text} entities={captioned.entities} />
+            <RichText text={captioned.text} entities={captioned.entities} highlight={query} />
           </div>
         )}
         <span className="time" title={new Date(last.date).toLocaleString()}>
