@@ -262,10 +262,20 @@ LEFT JOIN media md ON md.chat_id = m.chat_id AND md.message_id = m.message_id
 LEFT JOIN messages r ON r.chat_id = m.chat_id AND r.message_id = m.reply_to
 LEFT JOIN users ru ON ru.user_id = r.sender_id
 LEFT JOIN media rmd ON rmd.chat_id = r.chat_id AND rmd.message_id = r.message_id
-WHERE m.chat_id = $1 AND ($2::bigint IS NULL OR m.message_id < $2)
-ORDER BY m.message_id DESC
+WHERE m.chat_id = $1 AND {where}
+ORDER BY m.message_id {order}
 LIMIT $3
 """
+
+
+def _messages_sql(direction: str) -> str:
+    """'older': id < $2 newest first; 'newer': id > $2 oldest first; 'upto': id <= $2."""
+    where, order = {
+        "older": ("($2::bigint IS NULL OR m.message_id < $2)", "DESC"),
+        "upto": ("m.message_id <= $2", "DESC"),
+        "newer": ("m.message_id > $2", "ASC"),
+    }[direction]
+    return MESSAGES_SQL.format(where=where, order=order)
 
 
 def _message_out(r) -> dict[str, Any]:
@@ -314,13 +324,99 @@ def _message_out(r) -> dict[str, Any]:
 async def get_messages(
     chat_id: int,
     before: int | None = None,
+    after: int | None = None,
+    around: int | None = None,
     limit: int = Query(50, ge=1, le=200),
     pool=Depends(pool_dep),
 ):
-    """Newest first; pass the smallest id you have as ?before= to page backwards."""
-    rows = await pool.fetch(MESSAGES_SQL, chat_id, before, limit + 1)
+    """Always newest first.
+
+    - default / ?before=<id>: older page (has_more = older messages exist)
+    - ?after=<id>: the next newer page (has_newer = even newer ones exist)
+    - ?around=<id>: a window centred on <id>, for jumping to a reply/pin anywhere in history
+    """
+    if around is not None:
+        half = max(1, limit // 2)
+        older = await pool.fetch(_messages_sql("upto"), chat_id, around, half + 1)
+        newer = await pool.fetch(_messages_sql("newer"), chat_id, around, half + 1)
+        rows = list(reversed(newer[:half])) + older[:half]
+        return {"messages": [_message_out(r) for r in rows],
+                "has_more": len(older) > half, "has_newer": len(newer) > half}
+    if after is not None:
+        rows = await pool.fetch(_messages_sql("newer"), chat_id, after, limit + 1)
+        return {"messages": [_message_out(r) for r in reversed(rows[:limit])],
+                "has_more": True, "has_newer": len(rows) > limit}
+    rows = await pool.fetch(_messages_sql("older"), chat_id, before, limit + 1)
     has_more = len(rows) > limit
-    return {"messages": [_message_out(r) for r in rows[:limit]], "has_more": has_more}
+    return {"messages": [_message_out(r) for r in rows[:limit]], "has_more": has_more, "has_newer": False}
+
+
+MEDIA_GROUPS = {
+    "media": ("photo", "video", "gif"),
+    "files": ("document", "audio"),
+    "voice": ("voice",),
+}
+
+MEDIA_SQL = """
+SELECT md.message_id, m.date, m.text, m.grouped_id, u.name AS sender_name,
+       md.kind, md.mime, md.size, md.width, md.height, md.duration, md.thumb_b64,
+       md.file_path, md.file_name, md.gphotos_media_id, md.error AS media_error
+FROM media md
+JOIN messages m ON m.chat_id = md.chat_id AND m.message_id = md.message_id
+LEFT JOIN users u ON u.user_id = m.sender_id
+WHERE md.chat_id = $1 AND md.kind = ANY($2::text[]) AND {where}
+ORDER BY md.message_id {order}
+LIMIT $4
+"""
+
+
+@app.get("/api/chats/{chat_id}/media")
+async def get_media(
+    chat_id: int,
+    group: str = Query("media", pattern="^(media|files|voice)$"),
+    before: int | None = None,
+    after: int | None = None,
+    limit: int = Query(60, ge=1, le=200),
+    pool=Depends(pool_dep),
+):
+    """Shared media of a chat (Telegram's Media / Files / Voice tabs), newest first.
+
+    ?before=<id> pages older; ?after=<id> returns the next newer items (used by the
+    viewer's next/previous buttons).
+    """
+    kinds = list(MEDIA_GROUPS[group])
+    if after is not None:
+        sql = MEDIA_SQL.format(where="md.message_id > $3", order="ASC")
+        rows = list(reversed((await pool.fetch(sql, chat_id, kinds, after, limit + 1))[:limit]))
+        has_more = None
+    else:
+        sql = MEDIA_SQL.format(where="($3::bigint IS NULL OR md.message_id < $3)", order="DESC")
+        rows = await pool.fetch(sql, chat_id, kinds, before, limit + 1)
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+    items = [
+        {
+            "id": r["message_id"], "date": r["date"], "text": r["text"], "sender_name": r["sender_name"],
+            "grouped_id": str(r["grouped_id"]) if r["grouped_id"] is not None else None,
+            "media": {
+                "kind": r["kind"], "mime": r["mime"], "size": r["size"], "width": r["width"],
+                "height": r["height"], "duration": r["duration"], "thumb_b64": r["thumb_b64"],
+                "file_path": r["file_path"], "file_name": r["file_name"],
+                "gphotos_media_id": r["gphotos_media_id"], "error": r["media_error"],
+            },
+        }
+        for r in rows
+    ]
+    counts = await pool.fetchrow(
+        """
+        SELECT count(*) FILTER (WHERE kind IN ('photo', 'video', 'gif')) AS media,
+               count(*) FILTER (WHERE kind IN ('document', 'audio')) AS files,
+               count(*) FILTER (WHERE kind = 'voice') AS voice
+        FROM media WHERE chat_id = $1
+        """,
+        chat_id,
+    ) if before is None and after is None else None
+    return {"items": items, "has_more": has_more, "counts": dict(counts) if counts else None}
 
 
 @app.get("/api/chats/{chat_id}/pinned")

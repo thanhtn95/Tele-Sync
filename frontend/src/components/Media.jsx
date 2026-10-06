@@ -78,7 +78,7 @@ export function PhotoMedia({ media, fill, onOpen }) {
     <div
       className={`media-photo${fill ? ' fill' : ''}`}
       style={aspectStyle(media, fill)}
-      onClick={() => src.ready && onOpen?.({ kind: 'photo', src: src.full, onError: src.refresh })}
+      onClick={() => onOpen?.()}
     >
       {placeholder && <img className="thumb-blur" src={placeholder} alt="" aria-hidden />}
       {src.ready && (
@@ -109,7 +109,7 @@ export function VideoMedia({ media, fill, onOpen }) {
     <div
       className={`media-photo media-video${fill ? ' fill' : ''}`}
       style={aspectStyle(media, fill)}
-      onClick={() => src.ready && onOpen?.({ kind: 'video', src: src.video, loop: gif, onError: src.refresh })}
+      onClick={() => onOpen?.()}
     >
       {placeholder && <img className="thumb-blur" src={placeholder} alt="" aria-hidden />}
       {src.ready && local && <video className="real loaded" src={src.video} preload="metadata" muted />}
@@ -202,27 +202,4 @@ export default function Media({ media, fill, onOpen }) {
     default:
       return <DocumentMedia media={media} />;
   }
-}
-
-export function Lightbox({ item, onClose }) {
-  useEffect(() => {
-    const onKey = (e) => e.key === 'Escape' && onClose();
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-  if (!item) return null;
-  return (
-    <div className="lightbox" onClick={onClose}>
-      <button className="lightbox-close" onClick={onClose} aria-label="Close">
-        ✕
-      </button>
-      <div onClick={(e) => e.stopPropagation()}>
-        {item.kind === 'photo' ? (
-          <img src={item.src} alt="" onError={item.onError} />
-        ) : (
-          <video src={item.src} controls autoPlay loop={item.loop} onError={item.onError} />
-        )}
-      </div>
-    </div>
-  );
 }
