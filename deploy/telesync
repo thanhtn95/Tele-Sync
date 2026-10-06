@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Admin shortcuts for the VM, installed as /usr/local/bin/telesync by setup.sh.
+#   sudo telesync config        fill in .env (Telegram / Google / backup settings)
+#   sudo telesync password      set the web login
+#   sudo telesync tg-login      one-time Telegram login (phone + code)
+#   sudo telesync gphotos-auth  link Google Photos
+#   sudo telesync restart | status | logs
+set -euo pipefail
+
+APP=/opt/tele-sync
+PY="$APP/venv/bin/python"
+
+need_root() { [[ $EUID -eq 0 ]] || { echo "Run with sudo: sudo telesync $*"; exit 1; }; }
+restart() { systemctl restart telesync && echo "App restarted."; }
+run_py() { cd "$APP/backend" && "$PY" -m "$@"; }
+
+cmd=${1:-help}
+shift || true
+case "$cmd" in
+  config)
+    need_root config
+    run_py scripts.configure "$@"
+    read -r -p "Restart the app now so changes apply? [Y/n] " a
+    [[ ${a:-y} =~ ^[Yy] ]] && restart
+    ;;
+  password)
+    need_root password
+    run_py scripts.set_password && restart
+    ;;
+  tg-login)
+    need_root tg-login
+    # The session file must belong to the service user.
+    (cd "$APP/backend" && sudo -u telesync "$PY" -m scripts.tg_login) && restart
+    ;;
+  gphotos-auth)
+    need_root gphotos-auth
+    run_py scripts.gphotos_auth "$@" && restart
+    ;;
+  restart)
+    need_root restart
+    restart
+    ;;
+  status)
+    systemctl status telesync --no-pager | head -n 5
+    ;;
+  logs)
+    journalctl -u telesync -n "${1:-50}" --no-pager
+    ;;
+  *)
+    sed -n '2,7p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+esac
