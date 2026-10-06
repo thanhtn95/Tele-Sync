@@ -5,6 +5,7 @@ import { dayKey, formatDay } from '../lib/format.js';
 import MessageBubble from './Message.jsx';
 import { Lightbox } from './Media.jsx';
 import PinnedBar from './PinnedBar.jsx';
+import ThemeToggle from './ThemeToggle.jsx';
 
 const PAGE = 50;
 const START_INDEX = 10_000_000; // Virtuoso firstItemIndex must stay positive while prepending
@@ -231,6 +232,7 @@ export default function ChatView({ chatId }) {
             {loading ? ' · loading…' : ''}
           </div>
         </div>
+        <ThemeToggle />
       </header>
       <PinnedBar pins={pins} current={pinIndex} onJump={jumpTo} />
       {error && <div className="error-bar">{error}</div>}
