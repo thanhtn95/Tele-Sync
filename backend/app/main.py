@@ -7,12 +7,15 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+import secrets
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from telethon import utils
 
-from . import db
+from . import auth, db
 from .config import settings
 from .gphotos import GPhotos
 from .service import service_text
@@ -67,6 +70,85 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Telegram Archiver", lifespan=lifespan)
+
+# ---- auth -----------------------------------------------------------------------
+
+# Without SESSION_SECRET (set by scripts/set_password) sessions only last until restart.
+_session_secret = settings.session_secret or secrets.token_urlsafe(32)
+_throttle = auth.LoginThrottle()
+if not settings.auth_enabled:
+    log.warning("WEB_PASSWORD_HASH not set: web login disabled (run scripts/set_password.py)")
+
+PUBLIC_PATHS = ("/api/auth/", "/api/health")
+
+
+def is_authenticated(request: Request) -> bool:
+    if not settings.auth_enabled:
+        return True
+    return auth.check_token(
+        request.cookies.get(auth.COOKIE_NAME), settings.web_username, _session_secret,
+        settings.web_password_hash,
+    )
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    path = request.url.path
+    protected = (path.startswith("/api/") and not path.startswith(PUBLIC_PATHS)) or path.startswith("/files/")
+    if protected and not is_authenticated(request):
+        return JSONResponse({"detail": "login required"}, status_code=401)
+    return await call_next(request)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(max_length=200)
+    password: str = Field(max_length=1000)
+
+
+@app.post("/api/auth/login")
+async def login(body: LoginRequest, request: Request, response: Response):
+    if not settings.auth_enabled:
+        return {"authenticated": True, "auth_enabled": False}
+    wait = _throttle.retry_after()
+    if wait:
+        raise HTTPException(429, f"Too many attempts; try again in {wait}s", headers={"Retry-After": str(wait)})
+    user_ok = secrets.compare_digest(body.username.encode(), settings.web_username.encode())
+    pw_ok = await asyncio.to_thread(auth.verify_password, body.password, settings.web_password_hash)
+    if not (user_ok and pw_ok):
+        _throttle.failed()
+        await asyncio.sleep(0.5)
+        raise HTTPException(401, "Wrong username or password")
+    _throttle.succeeded()
+    token = auth.make_token(settings.web_username, _session_secret, settings.web_password_hash)
+    response.set_cookie(
+        auth.COOKIE_NAME, token, max_age=auth.SESSION_TTL, httponly=True, samesite="lax",
+        secure=request.url.scheme == "https", path="/",
+    )
+    return {"authenticated": True, "auth_enabled": True, "username": settings.web_username}
+
+
+@app.post("/api/auth/logout")
+async def logout(response: Response):
+    response.delete_cookie(auth.COOKIE_NAME, path="/")
+    return {"authenticated": False}
+
+
+@app.get("/api/auth/me")
+async def me(request: Request):
+    ok = is_authenticated(request)
+    return {
+        "authenticated": ok,
+        "auth_enabled": settings.auth_enabled,
+        "username": settings.web_username if ok and settings.auth_enabled else None,
+    }
+
+
+@app.get("/api/auth/check", status_code=204)
+async def auth_check(request: Request):
+    """For nginx auth_request on /files/."""
+    if not is_authenticated(request):
+        raise HTTPException(401)
+    return Response(status_code=204)
 
 
 def pool_dep(request: Request):

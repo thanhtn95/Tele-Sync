@@ -91,7 +91,7 @@ function ChatRow({ chat, status, onPatch }) {
   );
 }
 
-export default function ChatList() {
+export default function ChatList({ onLogout, username }) {
   const [chats, setChats] = useState(null);
   const [tab, setTab] = useState('all');
   const [query, setQuery] = useState('');
@@ -152,9 +152,16 @@ export default function ChatList() {
     <div className="chat-list-page">
       <header className="top">
         <h1>Telegram Archive</h1>
-        <button onClick={() => load(true)} disabled={refreshing} title="Re-read chat list from Telegram (slow)">
-          {refreshing ? 'Refreshing…' : '↻ Refresh chats'}
-        </button>
+        <div className="top-actions">
+          <button onClick={() => load(true)} disabled={refreshing} title="Re-read chat list from Telegram (slow)">
+            {refreshing ? 'Refreshing…' : '↻ Refresh chats'}
+          </button>
+          {onLogout && (
+            <button onClick={onLogout} title={username ? `Signed in as ${username}` : undefined}>
+              Log out
+            </button>
+          )}
+        </div>
       </header>
       <SyncPanel onStatus={setStatus} />
       {error && <div className="error-bar">{error}</div>}

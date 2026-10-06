@@ -2,7 +2,7 @@
 
 Syncs messages and media from **your own** Telegram account (only the chats you pick)
 into PostgreSQL, uploads photos/videos to Google Photos, and shows the archive in a
-Telegram-style web viewer. Single user, reachable only over Tailscale.
+Telegram-style web viewer. Single user: reachable only over Tailscale, behind a single-account web login.
 
 ```
 backend/    FastAPI + Telethon (MTProto user API) + asyncpg; sync worker runs in-process
@@ -46,6 +46,8 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
 
 | Method | Path | |
 |---|---|---|
+| POST | `/api/auth/login` `{username, password}` / `/api/auth/logout` | session cookie (30 days) |
+| GET | `/api/auth/me` | login state |
 | GET | `/api/dialogs[?refresh=true]` | chats (from DB; `refresh` re-reads Telegram, preserves sync flags) |
 | GET / PATCH | `/api/chats/{chat_id}` | one chat / update `sync_enabled`, `sync_media`, `sync_since` |
 | GET | `/api/chats/{chat_id}/messages?before=<id>&limit=50` | newest first, with media, sender, reply preview |
@@ -92,6 +94,7 @@ Then:
 
 ```bash
 sudo nano /opt/tele-sync/.env                         # TG_*, GOOGLE_CLIENT_*, GCS_BUCKET
+cd /opt/tele-sync/backend && sudo ../venv/bin/python -m scripts.set_password   # web login (setup.sh asks once)
 cd /opt/tele-sync/backend
 sudo -u telesync /opt/tele-sync/venv/bin/python -m scripts.tg_login   # phone, code, 2FA
 /opt/tele-sync/venv/bin/python -m scripts.gphotos_auth                # prints GOOGLE_REFRESH_TOKEN
@@ -105,6 +108,13 @@ sudo tailscale serve --bg 8080                        # https://<vm>.<tailnet>.t
 Logs: `journalctl -u telesync -f`.
 
 ### Security notes
+
+* **Web login**: one account. `scripts/set_password` stores a scrypt hash
+  (`WEB_PASSWORD_HASH`) and a random `SESSION_SECRET` in `.env`; restart the service after
+  changing it (that also logs out every session). Every `/api/*` route and `/files/*`
+  (via nginx `auth_request`) needs the HttpOnly, SameSite=Lax session cookie. After 5
+  wrong passwords, further attempts are refused with exponential back-off (max 5 min).
+  With `WEB_PASSWORD_HASH` empty, login is off and Tailscale is the only gate.
 
 * The Telethon `.session` file is **full access to your Telegram account**. It lives in
   `/var/lib/tele-sync/` (mode 600), is git-ignored, and should never leave the VM.
