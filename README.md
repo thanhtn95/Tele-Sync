@@ -105,9 +105,9 @@ sudo nano /opt/tele-sync/.env                         # TG_*, GOOGLE_CLIENT_*, G
 cd /opt/tele-sync/backend && sudo ../venv/bin/python -m scripts.set_password   # web login (setup.sh asks once)
 cd /opt/tele-sync/backend
 sudo -u telesync /opt/tele-sync/venv/bin/python -m scripts.tg_login   # phone, code, 2FA
-/opt/tele-sync/venv/bin/python -m scripts.gphotos_auth                # prints GOOGLE_REFRESH_TOKEN
-#   (from your laptop first: ssh -L 8765:localhost:8765 <vm>, then open the printed URL)
-sudo nano /opt/tele-sync/.env                         # paste GOOGLE_REFRESH_TOKEN
+sudo ../venv/bin/python -m scripts.gphotos_auth      # saves GOOGLE_REFRESH_TOKEN into .env
+#   open the printed link on any device (phone OK), allow access, then copy the address of the
+#   page that fails to load (http://localhost:8765/?code=...) and paste it into the terminal
 sudo systemctl restart telesync
 sudo tailscale up --ssh
 sudo tailscale serve --bg 8080                        # https://<vm>.<tailnet>.ts.net
