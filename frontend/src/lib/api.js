@@ -32,6 +32,11 @@ export const api = {
   messagesAfter: (id, after, limit = 50) => request('GET', `/api/chats/${id}/messages?limit=${limit}&after=${after}`),
   messagesAround: (id, around, limit = 60) =>
     request('GET', `/api/chats/${id}/messages?limit=${limit}&around=${around}`),
+  search: (id, q, before, limit = 50) =>
+    request(
+      'GET',
+      `/api/chats/${id}/search?q=${encodeURIComponent(q)}&limit=${limit}${before != null ? `&before=${before}` : ''}`,
+    ),
   chatMedia: (id, { group = 'media', before, after, limit = 60 } = {}) =>
     request(
       'GET',

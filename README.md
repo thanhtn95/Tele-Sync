@@ -46,6 +46,9 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
   loads older/newer pages and ↓ returns to the latest. Each chat has **Media / Files /
   Voice** tabs (`#/chat/<id>/media` …), and the photo/video viewer steps through the whole
   chat with ‹ ›, ←/→ or a swipe, with "Show in chat".
+* **Search in a chat** (🔍 in the header, like Telegram): ignores case and accents
+  ("tieng viet" finds "Tiếng Việt"), also matches file names; ▲/▼ or Enter step through
+  matches and jump to each, matches are highlighted, ☰ shows all results as a list.
 * **Theme**: the button in the header switches System → Light → Dark (Telegram's
   night colours); the choice is remembered per browser, and "System" follows the OS live.
 * **Pinned messages** mirror Telegram: every pass re-reads the chat's pinned list, so
@@ -65,6 +68,7 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
 | GET | `/api/chats/{chat_id}/messages?before=<id>&limit=50` | newest first, with media, sender, reply preview |
 | GET | `/api/chats/{chat_id}/messages?after=<id>` / `?around=<id>` | newer page / window around a message |
 | GET | `/api/chats/{chat_id}/media?group=media\|files\|voice&before=&after=` | shared media tabs, viewer neighbours |
+| GET | `/api/chats/{chat_id}/search?q=&before=` | accent/case-insensitive search, newest first |
 | GET | `/api/chats/{chat_id}/pinned` | currently pinned messages, newest first |
 | POST | `/api/gphotos/urls` `{media_ids, force?}` | fresh baseUrls (batchGet ≤50/call) |
 | GET | `/api/sync/status` | worker state + per-chat last sync / message count / error |

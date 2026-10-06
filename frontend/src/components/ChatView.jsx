@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Virtuoso } from 'react-virtuoso';
 import { api } from '../lib/api.js';
 import { dayKey, formatDay } from '../lib/format.js';
+import ChatSearch from './ChatSearch.jsx';
 import MediaPanel from './MediaPanel.jsx';
 import MediaViewer from './MediaViewer.jsx';
 import MessageBubble from './Message.jsx';
@@ -69,6 +70,8 @@ export default function ChatView({ chatId, tab = 'chat' }) {
   const [pinIndex, setPinIndex] = useState(0);
   const [counts, setCounts] = useState(null);
   const [viewer, setViewer] = useState(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [query, setQuery] = useState('');
   const virtuoso = useRef(null);
   const state = useRef({ messages: [], hasMore: true, hasNewer: false, loading: false });
   state.current.messages = messages;
@@ -127,6 +130,8 @@ export default function ChatView({ chatId, tab = 'chat' }) {
     setPins([]);
     setPinIndex(0);
     setCounts(null);
+    setSearchOpen(false);
+    setQuery('');
     api.chat(chatId).then((c) => alive && setChat(c), (e) => alive && setError(e.message));
     api.pinned(chatId).then((p) => alive && setPins(p), () => {});
     api.chatMedia(chatId, { limit: 1 }).then((r) => alive && setCounts(r.counts), () => {});
@@ -237,6 +242,11 @@ export default function ChatView({ chatId, tab = 'chat' }) {
     [chatId, tab, jumpTo],
   );
 
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    setQuery('');
+  }, []);
+
   const isGroup = chat?.type === 'group';
 
   const itemContent = useCallback(
@@ -257,27 +267,39 @@ export default function ChatView({ chatId, tab = 'chat' }) {
           highlighted={highlight && row.msgs.some((m) => m.id === highlight.id)}
           onJump={jumpTo}
           onOpen={setViewer}
+          query={query}
         />
       );
     },
-    [isGroup, highlight, jumpTo],
+    [isGroup, highlight, jumpTo, query],
   );
 
   return (
     <div className="chat-view">
-      <header className="chat-header">
-        <a href="#/" className="back" aria-label="Back to chats">
-          ←
-        </a>
-        <div className="chat-header-title">
-          <div className="chat-title">{chat?.title ?? '…'}</div>
-          <div className="muted small">
-            {chat ? `${chat.message_count.toLocaleString()} messages synced` : ''}
-            {loading ? ' · loading…' : ''}
+      {searchOpen && tab === 'chat' ? (
+        <header className="chat-header search-mode">
+          <ChatSearch chatId={chatId} onClose={closeSearch} onJump={jumpTo} onQuery={setQuery} />
+        </header>
+      ) : (
+        <header className="chat-header">
+          <a href="#/" className="back" aria-label="Back to chats">
+            ←
+          </a>
+          <div className="chat-header-title">
+            <div className="chat-title">{chat?.title ?? '…'}</div>
+            <div className="muted small">
+              {chat ? `${chat.message_count.toLocaleString()} messages synced` : ''}
+              {loading ? ' · loading…' : ''}
+            </div>
           </div>
-        </div>
-        <ThemeToggle />
-      </header>
+          {tab === 'chat' && (
+            <button className="icon-btn search-btn" onClick={() => setSearchOpen(true)} aria-label="Search in chat" title="Search">
+              🔍
+            </button>
+          )}
+          <ThemeToggle />
+        </header>
+      )}
       <nav className="chat-tabs" role="tablist">
         {TABS.map(([k, label]) => (
           <a
@@ -292,7 +314,7 @@ export default function ChatView({ chatId, tab = 'chat' }) {
           </a>
         ))}
       </nav>
-      {tab === 'chat' && <PinnedBar pins={pins} current={pinIndex} onJump={jumpTo} />}
+      {tab === 'chat' && !searchOpen && <PinnedBar pins={pins} current={pinIndex} onJump={jumpTo} />}
       {error && <div className="error-bar">{error}</div>}
       <div className="chat-body">
         {messages.length > 0 ? (

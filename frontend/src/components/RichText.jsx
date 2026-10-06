@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { buildSegments, entityHref, entityText } from '../lib/entities.js';
+import { findMatches } from '../lib/fold.js';
 
 function Spoiler({ children }) {
   const [shown, setShown] = useState(false);
@@ -21,6 +22,7 @@ const WRAP = {
   MessageEntityCashtag: (c, k) => <span key={k} className="ent-tag">{c}</span>,
   MessageEntityBotCommand: (c, k) => <span key={k} className="ent-tag">{c}</span>,
   MessageEntityMentionName: (c, k) => <span key={k} className="ent-mention">{c}</span>,
+  SearchHighlight: (c, k) => <mark key={k} className="hl">{c}</mark>,
 };
 
 // Block-level entities (pre, blockquote) group consecutive segments into one element.
@@ -46,9 +48,11 @@ function renderInline(text, seg, key) {
   return <React.Fragment key={key}>{node}</React.Fragment>;
 }
 
-export default function RichText({ text, entities }) {
+export default function RichText({ text, entities, highlight }) {
   if (!text) return null;
-  const segs = buildSegments(text, entities);
+  // Search matches ride along as a pseudo-entity, so they nest correctly with formatting.
+  const marks = highlight ? findMatches(text, highlight).map((m) => ({ _: 'SearchHighlight', ...m })) : [];
+  const segs = buildSegments(text, marks.length ? [...(entities || []), ...marks] : entities);
   const out = [];
   let i = 0;
   while (i < segs.length) {
