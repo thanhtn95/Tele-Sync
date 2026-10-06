@@ -4,7 +4,7 @@ import ChatView from './components/ChatView.jsx';
 import Login from './components/Login.jsx';
 import { api } from './lib/api.js';
 
-// Tiny hash router: #/ (chat list) and #/chat/<id> (viewer).
+// Tiny hash router: #/ (chat list), #/chat/<id> (viewer), #/chat/<id>/media|files|voice (tabs).
 function useHash() {
   const [hash, setHash] = useState(window.location.hash);
   useEffect(() => {
@@ -40,9 +40,9 @@ export default function App() {
   if (!auth) return null;
   if (!auth.authenticated) return <Login onLoggedIn={setAuth} />;
 
-  const m = hash.match(/^#\/chat\/(-?\d+)/);
+  const m = hash.match(/^#\/chat\/(-?\d+)(?:\/(media|files|voice))?/);
   return m ? (
-    <ChatView chatId={Number(m[1])} />
+    <ChatView chatId={Number(m[1])} tab={m[2] || 'chat'} />
   ) : (
     <ChatList onLogout={auth.auth_enabled ? logout : null} username={auth.username} />
   );

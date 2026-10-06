@@ -29,6 +29,16 @@ export const api = {
   pinned: (id) => request('GET', `/api/chats/${id}/pinned`),
   messages: (id, before, limit = 50) =>
     request('GET', `/api/chats/${id}/messages?limit=${limit}${before != null ? `&before=${before}` : ''}`),
+  messagesAfter: (id, after, limit = 50) => request('GET', `/api/chats/${id}/messages?limit=${limit}&after=${after}`),
+  messagesAround: (id, around, limit = 60) =>
+    request('GET', `/api/chats/${id}/messages?limit=${limit}&around=${around}`),
+  chatMedia: (id, { group = 'media', before, after, limit = 60 } = {}) =>
+    request(
+      'GET',
+      `/api/chats/${id}/media?group=${group}&limit=${limit}` +
+        (before != null ? `&before=${before}` : '') +
+        (after != null ? `&after=${after}` : ''),
+    ),
   gphotosUrls: (mediaIds, force = false) => request('POST', '/api/gphotos/urls', { media_ids: mediaIds, force }),
   syncStatus: () => request('GET', '/api/sync/status'),
   syncRun: () => request('POST', '/api/sync/run'),

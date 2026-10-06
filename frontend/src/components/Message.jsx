@@ -58,7 +58,7 @@ function AlbumGrid({ msgs, onOpen }) {
     <div className={`album album-${Math.min(n, 5)}`}>
       {items.map((m) => (
         <div className="album-cell" key={m.id}>
-          <Media media={m.media} fill onOpen={onOpen} />
+          <Media media={m.media} fill onOpen={() => onOpen(m)} />
         </div>
       ))}
     </div>
@@ -127,7 +127,7 @@ export default function MessageBubble({ msgs, showName, showAvatar, isGroup, hig
           </div>
         )}
         {first.reply && <ReplyPreview reply={first.reply} onJump={onJump} />}
-        {msgs.length > 1 ? <AlbumGrid msgs={msgs} onOpen={onOpen} /> : media && <Media media={media} onOpen={onOpen} />}
+        {msgs.length > 1 ? <AlbumGrid msgs={msgs} onOpen={onOpen} /> : media && <Media media={media} onOpen={() => onOpen(first)} />}
         {otherLabel && <div className="other-media">{otherLabel}</div>}
         {captioned.text && (
           <div className="text">

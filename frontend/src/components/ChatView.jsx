@@ -2,8 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Virtuoso } from 'react-virtuoso';
 import { api } from '../lib/api.js';
 import { dayKey, formatDay } from '../lib/format.js';
+import MediaPanel from './MediaPanel.jsx';
+import MediaViewer from './MediaViewer.jsx';
 import MessageBubble from './Message.jsx';
-import { Lightbox } from './Media.jsx';
 import PinnedBar from './PinnedBar.jsx';
 import ThemeToggle from './ThemeToggle.jsx';
 
@@ -38,132 +39,161 @@ export function buildRows(messages) {
   return rows;
 }
 
-export default function ChatView({ chatId }) {
+const rowIndexOf = (rows, id) => rows.findIndex((r) => r.type === 'msg' && r.msgs.some((m) => m.id === id));
+
+const TABS = [
+  ['chat', 'Chat'],
+  ['media', 'Media'],
+  ['files', 'Files'],
+  ['voice', 'Voice'],
+];
+
+/**
+ * The loaded messages are a window into the chat that can sit anywhere in history:
+ * opening shows the newest page; jumping to an old reply/pin loads a window around it.
+ * Scrolling up loads older pages, scrolling down loads newer ones until the latest.
+ */
+export default function ChatView({ chatId, tab = 'chat' }) {
   const [chat, setChat] = useState(null);
   const [messages, setMessages] = useState([]); // ascending by id
-  const [hasMore, setHasMore] = useState(true);
+  const [hasMore, setHasMore] = useState(true); // older messages exist
+  const [hasNewer, setHasNewer] = useState(false); // window is not at the latest message
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [firstItemIndex, setFirstItemIndex] = useState(START_INDEX);
+  const [listKey, setListKey] = useState(0); // bump to remount the list on a new window
+  const [initialIndex, setInitialIndex] = useState(null);
+  const [atBottom, setAtBottom] = useState(true);
   const [highlight, setHighlight] = useState(null);
   const [pins, setPins] = useState([]); // newest first
   const [pinIndex, setPinIndex] = useState(0);
-  const [lightbox, setLightbox] = useState(null);
+  const [counts, setCounts] = useState(null);
+  const [viewer, setViewer] = useState(null);
   const virtuoso = useRef(null);
-  const state = useRef({ messages: [], hasMore: true, loading: false });
+  const state = useRef({ messages: [], hasMore: true, hasNewer: false, loading: false });
   state.current.messages = messages;
   state.current.hasMore = hasMore;
+  state.current.hasNewer = hasNewer;
 
   const rows = useMemo(() => buildRows(messages), [messages]);
 
-  // Prepend older messages, keeping the scroll position: firstItemIndex shifts by the
-  // number of rows added (albums split across pages may merge, so diff the row counts).
-  const prepend = useCallback((older, more) => {
-    setHasMore(more);
-    if (!older.length) return;
-    const cur = state.current.messages;
-    const merged = [...older, ...cur];
-    const delta = buildRows(merged).length - buildRows(cur).length;
-    state.current.messages = merged;
-    setFirstItemIndex((f) => f - delta);
-    setMessages(merged);
-  }, []);
-
-  useEffect(() => {
-    let alive = true;
-    setMessages([]);
-    setHasMore(true);
-    setFirstItemIndex(START_INDEX);
-    setError(null);
-    api.chat(chatId).then((c) => alive && setChat(c), (e) => alive && setError(e.message));
-    setPins([]);
-    setPinIndex(0);
-    api.pinned(chatId).then((p) => alive && setPins(p), () => {});
-    state.current.loading = true;
-    setLoading(true);
-    api
-      .messages(chatId, null, PAGE)
-      .then(({ messages: page, has_more }) => {
-        if (!alive) return;
-        setMessages([...page].reverse());
-        setHasMore(has_more);
-      })
-      .catch((e) => alive && setError(e.message))
-      .finally(() => {
-        state.current.loading = false;
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [chatId]);
-
-  const loadOlder = useCallback(async () => {
+  const withLoading = useCallback(async (fn) => {
     const s = state.current;
-    if (s.loading || !s.hasMore || !s.messages.length) return;
+    // A scroll-triggered page load may be in flight; wait for it rather than dropping the action.
+    for (let i = 0; s.loading && i < 200; i++) await new Promise((r) => setTimeout(r, 50));
+    if (s.loading) return;
     s.loading = true;
     setLoading(true);
     try {
-      const { messages: page, has_more } = await api.messages(chatId, s.messages[0].id, PAGE);
-      prepend([...page].reverse(), has_more);
+      await fn();
     } catch (e) {
       setError(e.message);
     } finally {
       s.loading = false;
       setLoading(false);
     }
-  }, [chatId, prepend]);
+  }, []);
 
-  // Jump to a replied-to message, loading older pages until it is in memory.
+  /** Replace the window: newest page (target = null) or a window around message `target`. */
+  const openWindow = useCallback(
+    (target) =>
+      withLoading(async () => {
+        const res = target == null ? await api.messages(chatId, null, PAGE) : await api.messagesAround(chatId, target, PAGE * 2);
+        const asc = [...res.messages].reverse();
+        const newRows = buildRows(asc);
+        let idx = newRows.length - 1;
+        if (target != null) {
+          // The exact message may be missing (e.g. deleted); fall back to the nearest one.
+          const near = asc.find((m) => m.id >= target) ?? asc[asc.length - 1];
+          idx = Math.max(0, rowIndexOf(newRows, near?.id));
+          setHighlight({ id: near?.id, at: Date.now() });
+        }
+        state.current.messages = asc;
+        setMessages(asc);
+        setHasMore(res.has_more);
+        setHasNewer(Boolean(res.has_newer));
+        setFirstItemIndex(START_INDEX);
+        setInitialIndex(target == null ? { index: idx, align: 'end' } : { index: idx, align: 'center' });
+        setListKey((k) => k + 1);
+      }),
+    [chatId, withLoading],
+  );
+
+  useEffect(() => {
+    let alive = true;
+    setMessages([]);
+    setError(null);
+    setChat(null);
+    setPins([]);
+    setPinIndex(0);
+    setCounts(null);
+    api.chat(chatId).then((c) => alive && setChat(c), (e) => alive && setError(e.message));
+    api.pinned(chatId).then((p) => alive && setPins(p), () => {});
+    api.chatMedia(chatId, { limit: 1 }).then((r) => alive && setCounts(r.counts), () => {});
+    openWindow(null);
+    return () => {
+      alive = false;
+    };
+  }, [chatId, openWindow]);
+
+  // Prepend older messages, keeping the scroll position: firstItemIndex shifts by the
+  // number of rows added (albums split across pages may merge, so diff the row counts).
+  const loadOlder = useCallback(() => {
+    const s = state.current;
+    if (s.loading || !s.hasMore || !s.messages.length) return;
+    withLoading(async () => {
+      const res = await api.messages(chatId, s.messages[0].id, PAGE);
+      const older = [...res.messages].reverse();
+      setHasMore(res.has_more);
+      if (!older.length) return;
+      const cur = state.current.messages;
+      const merged = [...older, ...cur];
+      const delta = buildRows(merged).length - buildRows(cur).length;
+      state.current.messages = merged;
+      setFirstItemIndex((f) => f - delta);
+      setMessages(merged);
+    });
+  }, [chatId, withLoading]);
+
+  // Append newer messages (only when the window was opened somewhere in the past).
+  const loadNewer = useCallback(() => {
+    const s = state.current;
+    if (s.loading || !s.hasNewer || !s.messages.length) return;
+    withLoading(async () => {
+      const res = await api.messagesAfter(chatId, s.messages[s.messages.length - 1].id, PAGE);
+      const newer = [...res.messages].reverse();
+      setHasNewer(Boolean(res.has_newer));
+      if (!newer.length) return;
+      const merged = [...state.current.messages, ...newer];
+      state.current.messages = merged;
+      setMessages(merged);
+    });
+  }, [chatId, withLoading]);
+
+  // Jump to any message: scroll if loaded, otherwise load a window around it.
   const pendingJump = useRef(null);
   const jumpTo = useCallback(
-    async (id) => {
-      const s = state.current;
-      // A scroll-triggered page load may be in flight; wait for it rather than dropping the jump.
-      for (let i = 0; s.loading && i < 200; i++) await new Promise((r) => setTimeout(r, 50));
-      if (!s.messages.length || s.loading) return;
-      if (s.messages[0].id > id && s.hasMore) {
-        s.loading = true;
-        setLoading(true);
-        try {
-          let before = s.messages[0].id;
-          let more = true;
-          const older = [];
-          for (let i = 0; i < 40 && before > id && more; i++) {
-            const res = await api.messages(chatId, before, 200);
-            const page = res.messages;
-            more = res.has_more;
-            if (!page.length) break;
-            older.unshift(...[...page].reverse());
-            before = page[page.length - 1].id;
-          }
-          pendingJump.current = id;
-          prepend(older, more);
-        } finally {
-          s.loading = false;
-          setLoading(false);
-        }
-        return;
+    (id) => {
+      if (rowIndexOf(buildRows(state.current.messages), id) >= 0) {
+        pendingJump.current = id;
+        setHighlight({ id, at: Date.now() });
+      } else {
+        openWindow(id);
       }
-      pendingJump.current = id;
-      setHighlight({ id, at: Date.now() });
     },
-    [chatId, prepend],
+    [openWindow],
   );
 
   useEffect(() => {
     const id = pendingJump.current;
     if (id == null) return;
-    const idx = rows.findIndex((r) => r.type === 'msg' && r.msgs.some((m) => m.id === id));
+    const idx = rowIndexOf(rows, id);
     if (idx < 0) return;
     pendingJump.current = null;
-    // Defer until Virtuoso has applied a just-prepended page (new firstItemIndex), then
-    // repeat once item heights are measured so the target really ends up centered.
+    // rAF + a later repeat: the second pass corrects for rows measured on the way.
     const go = () => virtuoso.current?.scrollToIndex({ index: idx, align: 'center', behavior: 'auto' });
-    // Not cancelled on cleanup: setHighlight below re-runs this effect immediately.
     requestAnimationFrame(go);
     setTimeout(go, 250);
-    setHighlight({ id, at: Date.now() });
   }, [rows, highlight?.at]);
 
   useEffect(() => {
@@ -171,6 +201,11 @@ export default function ChatView({ chatId }) {
     const t = setTimeout(() => setHighlight(null), 1800);
     return () => clearTimeout(t);
   }, [highlight]);
+
+  const toLatest = useCallback(() => {
+    if (state.current.hasNewer) openWindow(null);
+    else virtuoso.current?.scrollToIndex({ index: rows.length - 1, align: 'end', behavior: 'smooth' });
+  }, [openWindow, rows.length]);
 
   // Like Telegram, the pinned bar shows the newest pin *above* the middle of the viewport;
   // so after jumping to a pin (centered), it moves on to the next older one.
@@ -193,6 +228,15 @@ export default function ChatView({ chatId }) {
     setPinIndex(idx >= 0 ? idx : 0);
   }, []);
 
+  const showInChat = useCallback(
+    (id) => {
+      setViewer(null);
+      if (tab !== 'chat') window.location.hash = `#/chat/${chatId}`;
+      jumpTo(id);
+    },
+    [chatId, tab, jumpTo],
+  );
+
   const isGroup = chat?.type === 'group';
 
   const itemContent = useCallback(
@@ -212,7 +256,7 @@ export default function ChatView({ chatId }) {
           showAvatar={row.lastOfRun}
           highlighted={highlight && row.msgs.some((m) => m.id === highlight.id)}
           onJump={jumpTo}
-          onOpen={setLightbox}
+          onOpen={setViewer}
         />
       );
     },
@@ -225,7 +269,7 @@ export default function ChatView({ chatId }) {
         <a href="#/" className="back" aria-label="Back to chats">
           ←
         </a>
-        <div>
+        <div className="chat-header-title">
           <div className="chat-title">{chat?.title ?? '…'}</div>
           <div className="muted small">
             {chat ? `${chat.message_count.toLocaleString()} messages synced` : ''}
@@ -234,32 +278,64 @@ export default function ChatView({ chatId }) {
         </div>
         <ThemeToggle />
       </header>
-      <PinnedBar pins={pins} current={pinIndex} onJump={jumpTo} />
+      <nav className="chat-tabs" role="tablist">
+        {TABS.map(([k, label]) => (
+          <a
+            key={k}
+            role="tab"
+            aria-selected={tab === k}
+            className={tab === k ? 'active' : ''}
+            href={k === 'chat' ? `#/chat/${chatId}` : `#/chat/${chatId}/${k}`}
+          >
+            {label}
+            {k !== 'chat' && counts?.[k] ? <span className="tab-count">{counts[k].toLocaleString()}</span> : null}
+          </a>
+        ))}
+      </nav>
+      {tab === 'chat' && <PinnedBar pins={pins} current={pinIndex} onJump={jumpTo} />}
       {error && <div className="error-bar">{error}</div>}
       <div className="chat-body">
         {messages.length > 0 ? (
           <Virtuoso
-            key={chatId}
+            key={`${chatId}-${listKey}`}
             ref={virtuoso}
             className="message-list"
             data={rows}
             firstItemIndex={firstItemIndex}
-            initialTopMostItemIndex={rows.length - 1}
+            initialTopMostItemIndex={initialIndex ?? rows.length - 1}
             computeItemKey={(_, row) => row.key}
             startReached={loadOlder}
+            endReached={loadNewer}
+            atBottomStateChange={setAtBottom}
             rangeChanged={onRangeChanged}
             itemContent={itemContent}
             alignToBottom
             increaseViewportBy={{ top: 800, bottom: 400 }}
             components={{
-              Header: () => <div className="list-header muted small">{hasMore ? 'Loading…' : 'Beginning of synced history'}</div>,
+              Header: () => (
+                <div className="list-header muted small">{hasMore ? 'Loading…' : 'Beginning of synced history'}</div>
+              ),
+              Footer: () => (hasNewer ? <div className="list-header muted small">Loading…</div> : null),
             }}
           />
         ) : (
           !loading && <div className="empty muted">No synced messages yet.</div>
         )}
+        {tab === 'chat' && (hasNewer || !atBottom) && messages.length > 0 && (
+          <button className="to-latest" onClick={toLatest} aria-label="Go to latest message" title="Go to latest">
+            ↓
+          </button>
+        )}
+        {tab !== 'chat' && (
+          // Overlay, so the message list keeps its place underneath.
+          <div className="tab-overlay">
+            <MediaPanel key={`${chatId}-${tab}`} chatId={chatId} group={tab} onOpen={setViewer} onShowInChat={showInChat} />
+          </div>
+        )}
       </div>
-      <Lightbox item={lightbox} onClose={() => setLightbox(null)} />
+      {viewer && (
+        <MediaViewer chatId={chatId} start={viewer} onClose={() => setViewer(null)} onShowInChat={showInChat} />
+      )}
     </div>
   );
 }
