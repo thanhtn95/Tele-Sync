@@ -10,7 +10,6 @@ _SIMPLE = {
     "MessageActionChatEditPhoto": "changed the group photo",
     "MessageActionChatJoinedByLink": "joined via invite link",
     "MessageActionChatJoinedByRequest": "was accepted to the group",
-    "MessageActionPinMessage": "pinned a message",
     "MessageActionHistoryClear": "cleared history",
     "MessageActionChatMigrateTo": "upgraded the group to a supergroup",
     "MessageActionChannelMigrateFrom": "group was upgraded to a supergroup",
@@ -25,6 +24,8 @@ _SIMPLE = {
 def service_text(action: dict[str, Any], actor: str | None) -> str:
     kind = action.get("_", "")
     who = actor or "Someone"
+    if kind == "MessageActionPinMessage":
+        return f"{who} pinned"  # the viewer appends the quoted message (reply_to)
     if kind == "MessageActionChatEditTitle":
         return f'{who} changed the name to "{action.get("title", "")}"'
     if kind == "MessageActionChatAddUser":

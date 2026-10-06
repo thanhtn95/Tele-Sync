@@ -4,6 +4,8 @@ import { api } from '../lib/api.js';
 import { dayKey, formatDay } from '../lib/format.js';
 import MessageBubble from './Message.jsx';
 import { Lightbox } from './Media.jsx';
+import PinnedBar from './PinnedBar.jsx';
+import ThemeToggle from './ThemeToggle.jsx';
 
 const PAGE = 50;
 const START_INDEX = 10_000_000; // Virtuoso firstItemIndex must stay positive while prepending
@@ -44,6 +46,8 @@ export default function ChatView({ chatId }) {
   const [error, setError] = useState(null);
   const [firstItemIndex, setFirstItemIndex] = useState(START_INDEX);
   const [highlight, setHighlight] = useState(null);
+  const [pins, setPins] = useState([]); // newest first
+  const [pinIndex, setPinIndex] = useState(0);
   const [lightbox, setLightbox] = useState(null);
   const virtuoso = useRef(null);
   const state = useRef({ messages: [], hasMore: true, loading: false });
@@ -72,6 +76,9 @@ export default function ChatView({ chatId }) {
     setFirstItemIndex(START_INDEX);
     setError(null);
     api.chat(chatId).then((c) => alive && setChat(c), (e) => alive && setError(e.message));
+    setPins([]);
+    setPinIndex(0);
+    api.pinned(chatId).then((p) => alive && setPins(p), () => {});
     state.current.loading = true;
     setLoading(true);
     api
@@ -112,9 +119,10 @@ export default function ChatView({ chatId }) {
   const jumpTo = useCallback(
     async (id) => {
       const s = state.current;
-      if (!s.messages.length) return;
+      // A scroll-triggered page load may be in flight; wait for it rather than dropping the jump.
+      for (let i = 0; s.loading && i < 200; i++) await new Promise((r) => setTimeout(r, 50));
+      if (!s.messages.length || s.loading) return;
       if (s.messages[0].id > id && s.hasMore) {
-        if (s.loading) return;
         s.loading = true;
         setLoading(true);
         try {
@@ -149,7 +157,12 @@ export default function ChatView({ chatId }) {
     const idx = rows.findIndex((r) => r.type === 'msg' && r.msgs.some((m) => m.id === id));
     if (idx < 0) return;
     pendingJump.current = null;
-    virtuoso.current?.scrollToIndex({ index: idx, align: 'center', behavior: 'auto' });
+    // Defer until Virtuoso has applied a just-prepended page (new firstItemIndex), then
+    // repeat once item heights are measured so the target really ends up centered.
+    const go = () => virtuoso.current?.scrollToIndex({ index: idx, align: 'center', behavior: 'auto' });
+    // Not cancelled on cleanup: setHighlight below re-runs this effect immediately.
+    requestAnimationFrame(go);
+    setTimeout(go, 250);
     setHighlight({ id, at: Date.now() });
   }, [rows, highlight?.at]);
 
@@ -158,6 +171,27 @@ export default function ChatView({ chatId }) {
     const t = setTimeout(() => setHighlight(null), 1800);
     return () => clearTimeout(t);
   }, [highlight]);
+
+  // Like Telegram, the pinned bar shows the newest pin *above* the middle of the viewport;
+  // so after jumping to a pin (centered), it moves on to the next older one.
+  const view = useRef({ rows, firstItemIndex, pins });
+  view.current = { rows, firstItemIndex, pins };
+  const onRangeChanged = useCallback(({ startIndex, endIndex }) => {
+    const { rows: rs, firstItemIndex: first, pins: ps } = view.current;
+    if (!ps.length) return;
+    const mid = Math.round((startIndex + endIndex) / 2) - first;
+    let row = null;
+    for (let i = Math.min(mid, rs.length - 1); i >= 0; i--) {
+      if (rs[i]?.type === 'msg') {
+        row = rs[i];
+        break;
+      }
+    }
+    if (!row) return;
+    const midId = row.msgs[0].id;
+    const idx = ps.findIndex((p) => p.id < midId);
+    setPinIndex(idx >= 0 ? idx : 0);
+  }, []);
 
   const isGroup = chat?.type === 'group';
 
@@ -198,7 +232,9 @@ export default function ChatView({ chatId }) {
             {loading ? ' · loading…' : ''}
           </div>
         </div>
+        <ThemeToggle />
       </header>
+      <PinnedBar pins={pins} current={pinIndex} onJump={jumpTo} />
       {error && <div className="error-bar">{error}</div>}
       <div className="chat-body">
         {messages.length > 0 ? (
@@ -211,6 +247,7 @@ export default function ChatView({ chatId }) {
             initialTopMostItemIndex={rows.length - 1}
             computeItemKey={(_, row) => row.key}
             startReached={loadOlder}
+            rangeChanged={onRangeChanged}
             itemContent={itemContent}
             alignToBottom
             increaseViewportBy={{ top: 800, bottom: 400 }}

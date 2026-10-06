@@ -4,7 +4,7 @@ import { formatTime, initials, peerColor } from '../lib/format.js';
 import Media from './Media.jsx';
 import RichText from './RichText.jsx';
 
-const MEDIA_LABEL = {
+export const MEDIA_LABEL = {
   photo: '🖼 Photo',
   video: '🎬 Video',
   gif: 'GIF',
@@ -73,9 +73,25 @@ export default function MessageBubble({ msgs, showName, showAvatar, isGroup, hig
   const last = msgs[msgs.length - 1];
 
   if (first.service) {
+    const pin = first.media_type == null && first.reply && /pinned$/.test(first.service);
+    if (pin) {
+      const r = first.reply;
+      const quoted = r.found ? r.text || MEDIA_LABEL[r.media_kind] || 'a message' : 'a message';
+      return (
+        <div className="service-row">
+          <button
+            className="service service-link"
+            onClick={() => r.found && onJump(r.message_id)}
+            disabled={!r.found}
+          >
+            {first.service} «{quoted.length > 60 ? `${quoted.slice(0, 60)}…` : quoted}»
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="service-row">
-        <span className="service">{first.service}</span>
+        <span className="service">{/pinned$/.test(first.service) ? `${first.service} a message` : first.service}</span>
       </div>
     );
   }
@@ -119,6 +135,11 @@ export default function MessageBubble({ msgs, showName, showAvatar, isGroup, hig
           </div>
         )}
         <span className="time" title={new Date(last.date).toLocaleString()}>
+          {msgs.some((m) => m.pinned) && (
+            <span className="pin-icon" title="Pinned" aria-label="Pinned">
+              📌
+            </span>
+          )}
           {edited && 'edited '}
           {formatTime(last.date)}
         </span>

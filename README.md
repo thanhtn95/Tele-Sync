@@ -41,6 +41,13 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
   blurred stripped-thumbnail placeholders, click-to-open full image (`=d`) / video (`=dv`).
   baseUrls are fetched in batches from `POST /api/gphotos/urls`, never persisted, and
   re-fetched when an image fails to load (expired).
+* **Theme**: the button in the header switches System → Light → Dark (Telegram's
+  night colours); the choice is remembered per browser, and "System" follows the OS live.
+* **Pinned messages** mirror Telegram: every pass re-reads the chat's pinned list, so
+  pins/unpins of old messages are picked up, and pinned messages older than *sync since*
+  are archived too. The viewer has Telegram's pinned bar (shows the pin above your scroll
+  position; click to jump, then it steps to the next older pin), a list of all pins, a 📌
+  on pinned bubbles, and clickable "X pinned «…»" service messages.
 
 ## API
 
@@ -51,6 +58,7 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
 | GET | `/api/dialogs[?refresh=true]` | chats (from DB; `refresh` re-reads Telegram, preserves sync flags) |
 | GET / PATCH | `/api/chats/{chat_id}` | one chat / update `sync_enabled`, `sync_media`, `sync_since` |
 | GET | `/api/chats/{chat_id}/messages?before=<id>&limit=50` | newest first, with media, sender, reply preview |
+| GET | `/api/chats/{chat_id}/pinned` | currently pinned messages, newest first |
 | POST | `/api/gphotos/urls` `{media_ids, force?}` | fresh baseUrls (batchGet ≤50/call) |
 | GET | `/api/sync/status` | worker state + per-chat last sync / message count / error |
 | POST | `/api/sync/run` | trigger a pass now |

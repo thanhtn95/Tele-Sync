@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { api } from '../lib/api.js';
+import ThemeToggle from './ThemeToggle.jsx';
 
 export default function Login({ onLoggedIn }) {
   const [username, setUsername] = useState('');
@@ -44,6 +45,7 @@ export default function Login({ onLoggedIn }) {
         <button type="submit" className="primary" disabled={busy}>
           {busy ? 'Signing in…' : 'Sign in'}
         </button>
+        <ThemeToggle />
       </form>
     </div>
   );

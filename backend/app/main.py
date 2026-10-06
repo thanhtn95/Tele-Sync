@@ -249,7 +249,7 @@ async def patch_chat(chat_id: int, body: ChatPatch, request: Request, pool=Depen
 
 MESSAGES_SQL = """
 SELECT m.message_id, m.sender_id, m.date, m.text, m.reply_to, m.grouped_id, m.fwd_from_name,
-       m.edit_date, m.out, m.raw->'entities' AS entities, m.raw->'action' AS action,
+       m.edit_date, m.out, m.pinned, m.raw->'entities' AS entities, m.raw->'action' AS action,
        m.raw->'media'->>'_' AS media_type,
        u.name AS sender_name, u.username AS sender_username, u.avatar_path AS sender_avatar,
        md.kind, md.mime, md.size, md.width, md.height, md.duration, md.thumb_b64,
@@ -302,6 +302,7 @@ def _message_out(r) -> dict[str, Any]:
         "grouped_id": str(r["grouped_id"]) if r["grouped_id"] is not None else None,
         "fwd_from_name": r["fwd_from_name"],
         "out": r["out"],
+        "pinned": r["pinned"],
         "service": service_text(action, r["sender_name"]) if action else None,
         "media_type": r["media_type"],
         "media": media,
@@ -320,6 +321,28 @@ async def get_messages(
     rows = await pool.fetch(MESSAGES_SQL, chat_id, before, limit + 1)
     has_more = len(rows) > limit
     return {"messages": [_message_out(r) for r in rows[:limit]], "has_more": has_more}
+
+
+@app.get("/api/chats/{chat_id}/pinned")
+async def get_pinned(chat_id: int, pool=Depends(pool_dep)):
+    """Currently pinned messages, newest first (Telegram's pinned bar order)."""
+    rows = await pool.fetch(
+        """
+        SELECT m.message_id, m.date, left(m.text, 300) AS text, m.raw->'media'->>'_' AS media_type,
+               u.name AS sender_name, md.kind, md.thumb_b64
+        FROM messages m
+        LEFT JOIN users u ON u.user_id = m.sender_id
+        LEFT JOIN media md ON md.chat_id = m.chat_id AND md.message_id = m.message_id
+        WHERE m.chat_id = $1 AND m.pinned
+        ORDER BY m.message_id DESC
+        """,
+        chat_id,
+    )
+    return [
+        {"id": r["message_id"], "date": r["date"], "text": r["text"], "sender_name": r["sender_name"],
+         "media_kind": r["kind"], "media_type": r["media_type"], "thumb_b64": r["thumb_b64"]}
+        for r in rows
+    ]
 
 
 # ---- google photos ------------------------------------------------------------
