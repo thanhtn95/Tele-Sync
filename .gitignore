@@ -1,0 +1,16 @@
+# Secrets: never commit
+.env
+*.session
+*.session-journal
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Frontend
+node_modules/
+frontend/dist/
