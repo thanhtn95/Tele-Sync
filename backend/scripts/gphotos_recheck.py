@@ -21,6 +21,7 @@ async def missing_ids(gp: GPhotos, ids: list[str]) -> list[str]:
     """Ids Google explicitly reports as unavailable. Aborts on any failed call, so an
     auth/network problem can never be mistaken for 'everything is missing'."""
     missing: list[str] = []
+    ids = list(dict.fromkeys(ids))
     for i in range(0, len(ids), BATCH_LIMIT):
         chunk = ids[i : i + BATCH_LIMIT]
         r = await gp._request("GET", f"{API}/mediaItems:batchGet", params=[("mediaItemIds", m) for m in chunk])
@@ -58,11 +59,14 @@ async def main() -> None:
     pool = await db.create_pool(settings.database_url)
     gp = GPhotos(settings.google_client_id, settings.google_client_secret, settings.google_refresh_token)
     try:
+        # Google Photos dedupes identical uploads (the same photo forwarded several
+        # times gets one id), and batchGet rejects repeated ids: check each id once.
         ids = [r["gphotos_media_id"] for r in await pool.fetch(
-            "SELECT gphotos_media_id FROM media WHERE gphotos_media_id IS NOT NULL ORDER BY chat_id, message_id")]
-        print(f"Checking {len(ids)} stored Google Photos items against the linked account…")
+            "SELECT DISTINCT gphotos_media_id FROM media WHERE gphotos_media_id IS NOT NULL ORDER BY 1")]
+        print(f"Checking {len(ids)} distinct Google Photos items against the linked account…")
         missing = await missing_ids(gp, ids)
         print(f"{len(ids) - len(missing)} found, {len(missing)} not in the linked account.")
+        # (an id shared by several messages re-queues all of them via ANY below)
         if missing and not dry:
             await pool.execute(
                 "UPDATE media SET gphotos_media_id = NULL, error = NULL WHERE gphotos_media_id = ANY($1::text[])",
