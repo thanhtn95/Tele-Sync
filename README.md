@@ -61,6 +61,13 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
 * **Search in a chat** (🔍 in the header, like Telegram): ignores case and accents
   ("tieng viet" finds "Tiếng Việt"), also matches file names; ▲/▼ or Enter step through
   matches and jump to each, matches are highlighted, ☰ shows all results as a list.
+* **Search all chats**: typing 2+ characters in the chat-list search box also lists
+  matching messages from every chat (same accent-insensitive matching, newest first);
+  tap one to open the chat at that message.
+* **Unread badges**: messages from others that arrived since you last scrolled to the
+  bottom of a chat show as a count on the chat (synced chats only, 999+ max); those chats
+  sort first and the browser tab shows the total, e.g. "(5) Telegram Archive". History
+  imported by a sync pass doesn't count as unread.
 * **Theme**: the button in the header switches System → Light → Dark (Telegram's
   night colours); the choice is remembered per browser, and "System" follows the OS live.
 * **Pinned messages** mirror Telegram: every pass re-reads the chat's pinned list, so
@@ -81,6 +88,8 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
 | GET | `/api/chats/{chat_id}/messages?after=<id>` / `?around=<id>` | newer page / window around a message |
 | GET | `/api/chats/{chat_id}/media?group=media\|files\|voice&before=&after=` | shared media tabs, viewer neighbours |
 | GET | `/api/chats/{chat_id}/search?q=&before=` | accent/case-insensitive search, newest first |
+| GET | `/api/search?q=&before_date=&before_chat=&before_id=` | search all chats, newest first |
+| POST | `/api/chats/{chat_id}/read` | mark the chat read up to its newest message |
 | POST | `/api/chats/{chat_id}/send` `{text, reply_to?}` | send a text message as you |
 | GET | `/api/chats/{chat_id}/pinned` | currently pinned messages, newest first |
 | POST | `/api/gphotos/urls` `{media_ids, force?}` | fresh baseUrls (batchGet ≤50/call) |

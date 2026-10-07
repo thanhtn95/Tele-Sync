@@ -191,7 +191,14 @@ async def _require_tg(request: Request):
 CHAT_COLS = """
   c.chat_id, c.title, c.type, c.sync_enabled, c.sync_media, c.sync_since,
   c.last_msg_id, c.last_synced_at, (c.gphotos_album_id IS NOT NULL) AS has_album,
-  c.message_count  -- kept by the sync worker; counting live got slow on big archives
+  c.message_count,  -- kept by the sync worker; counting live got slow on big archives
+  CASE WHEN c.sync_enabled THEN (
+    SELECT count(*) FROM (
+      SELECT 1 FROM messages m
+      WHERE m.chat_id = c.chat_id AND m.date > c.last_read_at AND NOT m.out
+      LIMIT 1000  -- (chat_id, date) index range; shown as "999+" above this
+    ) u
+  ) ELSE 0 END AS unread_count
 """
 
 
@@ -235,6 +242,7 @@ async def list_dialogs(request: Request, refresh: bool = False, pool=Depends(poo
     if refresh or empty:
         await refresh_dialogs(request)
     rows = await pool.fetch(f"SELECT {CHAT_COLS} FROM chats c ORDER BY c.sync_enabled DESC, c.title")
+    # (the page sorts chats with unread messages first)
     return [_chat_out(r) for r in rows]
 
 
@@ -380,6 +388,81 @@ TOTAL_CAP = 1000
 
 def _like_escape(q: str) -> str:
     return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+@app.post("/api/chats/{chat_id}/read")
+async def mark_read(chat_id: int, pool=Depends(pool_dep)):
+    """Mark everything currently in the chat as read (called when you view the latest)."""
+    r = await pool.fetchrow(
+        """
+        UPDATE chats SET last_read_at = GREATEST(
+          last_read_at,
+          COALESCE((SELECT max(date) FROM messages WHERE chat_id = $1), last_read_at))
+        WHERE chat_id = $1 RETURNING last_read_at
+        """,
+        chat_id,
+    )
+    if r is None:
+        raise HTTPException(404, "chat not found")
+    return {"last_read_at": r["last_read_at"]}
+
+
+@app.get("/api/search")
+async def search_all(
+    q: str = Query(..., min_length=1, max_length=200),
+    before_date: dt.datetime | None = None,
+    before_chat: int | None = None,
+    before_id: int | None = None,
+    limit: int = Query(30, ge=1, le=100),
+    pool=Depends(pool_dep),
+):
+    """Search every synced chat (text, captions, file names), newest first.
+
+    Page with the last result's date / chat_id / id as before_date / before_chat / before_id.
+    """
+    q = q.strip()
+    if not q:
+        raise HTTPException(422, "empty query")
+    pattern = "%" + _like_escape(q) + "%"
+    cursor = before_date is not None and before_chat is not None and before_id is not None
+    matches = """
+        SELECT chat_id, message_id FROM messages WHERE search_text LIKE fold_text($1) ESCAPE '\\'
+        UNION
+        SELECT chat_id, message_id FROM media WHERE search_name LIKE fold_text($1) ESCAPE '\\'
+    """
+    rows = await pool.fetch(
+        f"""
+        WITH hits AS ({matches})
+        SELECT m.chat_id, m.message_id, m.date, left(m.text, 1000) AS text, m.out,
+               u.name AS sender_name, c.title AS chat_title, c.type AS chat_type,
+               md.kind AS media_kind, md.file_name
+        FROM hits
+        JOIN messages m ON m.chat_id = hits.chat_id AND m.message_id = hits.message_id
+        JOIN chats c ON c.chat_id = m.chat_id
+        LEFT JOIN media md ON md.chat_id = m.chat_id AND md.message_id = m.message_id
+        LEFT JOIN users u ON u.user_id = m.sender_id
+        WHERE (NOT $2 OR (m.date, m.chat_id, m.message_id) < ($3, $4, $5))
+        ORDER BY m.date DESC, m.chat_id DESC, m.message_id DESC
+        LIMIT $6
+        """,
+        pattern, cursor, before_date, before_chat, before_id, limit + 1,
+    )
+    total = None
+    if not cursor:
+        total = await pool.fetchval(
+            f"SELECT count(*) FROM (SELECT 1 FROM ({matches}) h LIMIT {TOTAL_CAP + 1}) c", pattern
+        )
+    return {
+        "results": [
+            {"chat_id": r["chat_id"], "chat_title": r["chat_title"], "chat_type": r["chat_type"],
+             "id": r["message_id"], "date": r["date"], "text": r["text"], "out": r["out"],
+             "sender_name": r["sender_name"], "media_kind": r["media_kind"], "file_name": r["file_name"]}
+            for r in rows[:limit]
+        ],
+        "has_more": len(rows) > limit,
+        "total": min(total, TOTAL_CAP) if total is not None else None,
+        "total_capped": total is not None and total > TOTAL_CAP,
+    }
 
 
 @app.get("/api/chats/{chat_id}/search")

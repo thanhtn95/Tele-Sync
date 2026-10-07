@@ -60,9 +60,9 @@ export default function App() {
   if (!auth) return null;
   if (!auth.authenticated) return <Login onLoggedIn={setAuth} />;
 
-  const m = hash.match(/^#\/chat\/(-?\d+)(?:\/(media|files|voice))?/);
+  const m = hash.match(/^#\/chat\/(-?\d+)(?:\/(media|files|voice))?(?:\?m=(\d+))?/);
   return m ? (
-    <ChatView chatId={Number(m[1])} tab={m[2] || 'chat'} />
+    <ChatView chatId={Number(m[1])} tab={m[2] || 'chat'} openAt={m[3] ? Number(m[3]) : null} />
   ) : (
     <ChatList onLogout={auth.auth_enabled ? logout : null} username={auth.username} />
   );

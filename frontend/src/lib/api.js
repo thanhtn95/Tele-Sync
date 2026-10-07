@@ -28,6 +28,15 @@ export const api = {
   patchChat: (id, patch) => request('PATCH', `/api/chats/${id}`, patch),
   send: (id, text, replyTo) =>
     request('POST', `/api/chats/${id}/send`, replyTo ? { text, reply_to: replyTo } : { text }),
+  markRead: (id) => request('POST', `/api/chats/${id}/read`),
+  searchAll: (q, cursor, limit = 30) =>
+    request(
+      'GET',
+      `/api/search?q=${encodeURIComponent(q)}&limit=${limit}` +
+        (cursor
+          ? `&before_date=${encodeURIComponent(cursor.date)}&before_chat=${cursor.chat_id}&before_id=${cursor.id}`
+          : ''),
+    ),
   pinned: (id) => request('GET', `/api/chats/${id}/pinned`),
   messages: (id, before, limit = 50) =>
     request('GET', `/api/chats/${id}/messages?limit=${limit}${before != null ? `&before=${before}` : ''}`),
