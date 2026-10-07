@@ -104,9 +104,13 @@ function ChatRow({ chat, status, onPatch }) {
   const unread = status?.unread_count ?? chat.unread_count ?? 0;
   const lastSynced = status?.last_synced_at ?? chat.last_synced_at;
   const syncing = status?.syncing;
+  // The whole row opens the chat; its own controls (badge, ⚙, toggle) keep their clicks.
+  const openChat = (e) => {
+    if (count > 0 && !e.target.closest('a, button, input, label')) window.location.hash = `#/chat/${chat.chat_id}`;
+  };
   return (
     <li className={`chat-row${chat.sync_enabled ? ' enabled' : ''}`}>
-      <div className="chat-row-main">
+      <div className={`chat-row-main${count > 0 ? ' openable' : ''}`} onClick={openChat}>
         <Avatar name={chat.title} id={chat.chat_id} size={42} />
         <div className="chat-row-info">
           {count > 0 ? (

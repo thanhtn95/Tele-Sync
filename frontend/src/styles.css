@@ -227,8 +227,11 @@ button:disabled {
   color: var(--text);
   text-decoration: none;
 }
-a.chat-row-title:hover {
-  color: var(--accent);
+.chat-row-main.openable {
+  cursor: pointer;
+}
+.chat-row-main.openable:hover {
+  background: var(--hover);
 }
 .type-badge {
   text-transform: capitalize;
