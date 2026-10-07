@@ -41,6 +41,8 @@ if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='telesync'
   sudo -u postgres psql -q -c "CREATE DATABASE telesync OWNER telesync"
   NEW_DB_URL="postgresql://telesync:$DB_PASS@127.0.0.1:5432/telesync"
 fi
+# Trigram index support for fast in-chat search (extensions need a superuser).
+sudo -u postgres psql -q -d telesync -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
 
 echo "== app user + dirs"
 id telesync >/dev/null 2>&1 || useradd --system --home-dir "$DATA/home" --create-home --shell /usr/sbin/nologin telesync
