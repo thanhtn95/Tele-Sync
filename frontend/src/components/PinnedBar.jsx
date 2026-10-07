@@ -2,12 +2,15 @@ import React, { useEffect, useState } from 'react';
 import { formatTime } from '../lib/format.js';
 import { thumbUrl } from '../lib/thumb.js';
 import { MEDIA_LABEL } from './Message.jsx';
+import { useHideMedia } from '../lib/privacy.js';
 
 export function pinPreview(p) {
   return p.text || MEDIA_LABEL[p.media_kind] || (p.media_type ? 'Media' : 'Message');
 }
 
 function PinThumb({ pin }) {
+  const hidden = useHideMedia();
+  if (hidden) return null;
   const t = ['photo', 'video', 'gif'].includes(pin.media_kind) && thumbUrl(pin.thumb_b64);
   return t ? <img className="pin-thumb" src={t} alt="" /> : null;
 }

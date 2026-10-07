@@ -3,6 +3,7 @@ import { fileUrl } from '../lib/api.js';
 import { formatDuration, formatSize } from '../lib/format.js';
 import { getBaseUrl } from '../lib/gphotos.js';
 import { thumbUrl } from '../lib/thumb.js';
+import { useHideMedia, VISUAL_KINDS } from '../lib/privacy.js';
 
 const Lottie = React.lazy(() => import('./Lottie.jsx'));
 
@@ -188,7 +189,28 @@ function DocumentMedia({ media }) {
   );
 }
 
-export default function Media({ media, fill, onOpen }) {
+const HIDDEN_LABEL = { photo: '🖼 Photo', video: '🎬 Video', gif: 'GIF', sticker: 'Sticker' };
+
+/** Neutral stand-in while "hide media" is on: no thumbnail, nothing to see. */
+export function HiddenMedia({ label, onShow, fill }) {
+  return (
+    <button type="button" className={`media-hidden${fill ? ' fill' : ''}`} onClick={onShow}>
+      {label} · <span className="muted">tap to show</span>
+    </button>
+  );
+}
+
+export default function Media(props) {
+  const hidden = useHideMedia();
+  const [shown, setShown] = useState(false);
+  // `revealed`: the parent (e.g. an album) was already tapped open.
+  if (hidden && !shown && !props.revealed && VISUAL_KINDS.has(props.media.kind)) {
+    return <HiddenMedia label={HIDDEN_LABEL[props.media.kind]} fill={props.fill} onShow={() => setShown(true)} />;
+  }
+  return <VisibleMedia {...props} />;
+}
+
+function VisibleMedia({ media, fill, onOpen }) {
   switch (media.kind) {
     case 'photo':
       return <PhotoMedia media={media} fill={fill} onOpen={onOpen} />;

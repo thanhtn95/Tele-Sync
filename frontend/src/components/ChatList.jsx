@@ -4,6 +4,7 @@ import { formatAgo } from '../lib/format.js';
 import { Avatar } from './Message.jsx';
 import SyncPanel from './SyncPanel.jsx';
 import ThemeToggle from './ThemeToggle.jsx';
+import PrivacyToggle from './PrivacyToggle.jsx';
 
 const TABS = [
   ['all', 'All'],
@@ -154,6 +155,7 @@ export default function ChatList({ onLogout, username }) {
       <header className="top">
         <h1>Telegram Archive</h1>
         <div className="top-actions">
+          <PrivacyToggle />
           <ThemeToggle />
           <button onClick={() => load(true)} disabled={refreshing} title="Re-read chat list from Telegram (slow)">
             {refreshing ? 'Refreshing…' : '↻ Refresh chats'}

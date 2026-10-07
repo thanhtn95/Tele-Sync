@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { fileUrl } from '../lib/api.js';
 import { formatTime, initials, peerColor } from '../lib/format.js';
-import Media from './Media.jsx';
+import Media, { HiddenMedia } from './Media.jsx';
+import { useHideMedia } from '../lib/privacy.js';
 import RichText from './RichText.jsx';
 
 export const MEDIA_LABEL = {
@@ -28,8 +29,9 @@ const OTHER_MEDIA_LABEL = {
 
 export function Avatar({ name, path, id, size = 34 }) {
   const [broken, setBroken] = useState(false);
+  const hidden = useHideMedia();
   const style = { width: size, height: size, fontSize: size * 0.4 };
-  if (path && !broken) {
+  if (path && !broken && !hidden) {
     return <img className="avatar" style={style} src={fileUrl(path)} alt="" loading="lazy" onError={() => setBroken(true)} />;
   }
   return (
@@ -54,11 +56,16 @@ function ReplyPreview({ reply, onJump }) {
 function AlbumGrid({ msgs, onOpen }) {
   const items = msgs.filter((m) => m.media);
   const n = items.length;
+  const hidden = useHideMedia();
+  const [shown, setShown] = useState(false);
+  if (hidden && !shown) {
+    return <HiddenMedia label={`🖼 Album · ${n} items`} onShow={() => setShown(true)} />;
+  }
   return (
     <div className={`album album-${Math.min(n, 5)}`}>
       {items.map((m) => (
         <div className="album-cell" key={m.id}>
-          <Media media={m.media} fill onOpen={() => onOpen(m)} />
+          <Media media={m.media} fill revealed={shown} onOpen={() => onOpen(m)} />
         </div>
       ))}
     </div>
@@ -68,9 +75,10 @@ function AlbumGrid({ msgs, onOpen }) {
 /**
  * One bubble. `msgs` has several entries for an album (same grouped_id).
  */
-export default function MessageBubble({ msgs, showName, showAvatar, isGroup, highlighted, onJump, onOpen, query }) {
+export default function MessageBubble({ msgs, showName, showAvatar, isGroup, highlighted, onJump, onOpen, query, onReply }) {
   const first = msgs[0];
   const last = msgs[msgs.length - 1];
+  const hideMedia = useHideMedia();
 
   if (first.service) {
     const pin = first.media_type == null && first.reply && /pinned$/.test(first.service);
@@ -98,14 +106,26 @@ export default function MessageBubble({ msgs, showName, showAvatar, isGroup, hig
 
   const captioned = msgs.find((m) => m.text) || first;
   const media = msgs.length > 1 ? null : first.media;
-  const isSticker = media?.kind === 'sticker';
-  const isVisual = msgs.length > 1 || ['photo', 'video', 'gif'].includes(media?.kind);
+  // With media hidden, bubbles get the plain text layout (the label is small).
+  const isSticker = !hideMedia && media?.kind === 'sticker';
+  const isVisual = !hideMedia && (msgs.length > 1 || ['photo', 'video', 'gif'].includes(media?.kind));
   const otherLabel = !first.media && first.media_type ? OTHER_MEDIA_LABEL[first.media_type] : null;
   const edited = msgs.some((m) => m.edit_date);
   const out = first.out;
 
   return (
-    <div className={`row ${out ? 'out' : 'in'}${highlighted ? ' highlight' : ''}`}>
+    <div
+      className={`row ${out ? 'out' : 'in'}${highlighted ? ' highlight' : ''}`}
+      onContextMenu={
+        onReply
+          ? (e) => {
+              // long-press on a phone / right-click on a computer = reply
+              e.preventDefault();
+              onReply(captioned);
+            }
+          : undefined
+      }
+    >
       {isGroup && !out && (
         <div className="avatar-slot">
           {showAvatar && <Avatar name={first.sender_name} path={first.sender_avatar} id={first.sender_id} />}
@@ -133,6 +153,11 @@ export default function MessageBubble({ msgs, showName, showAvatar, isGroup, hig
           <div className="text">
             <RichText text={captioned.text} entities={captioned.entities} highlight={query} />
           </div>
+        )}
+        {onReply && (
+          <button className="bubble-reply-btn" onClick={() => onReply(captioned)} aria-label="Reply" title="Reply">
+            ↩
+          </button>
         )}
         <span className="time" title={new Date(last.date).toLocaleString()}>
           {msgs.some((m) => m.pinned) && (
