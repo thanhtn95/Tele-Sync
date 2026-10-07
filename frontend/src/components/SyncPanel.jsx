@@ -79,16 +79,27 @@ export default function SyncPanel({ onStatus }) {
       setSt(s);
       setErr(null);
       onStatusRef.current?.(s);
-      timer.current = setTimeout(poll, s.running ? 3000 : 15000);
+      // Fast while syncing, slow when idle, and paused while the tab is hidden (see below):
+      // every request is billed VM traffic.
+      timer.current = setTimeout(poll, s.running ? 5000 : 60000);
     } catch (e) {
       setErr(e.message);
-      timer.current = setTimeout(poll, 15000);
+      timer.current = setTimeout(poll, 60000);
     }
   }, []);
 
   useEffect(() => {
     poll();
-    return () => clearTimeout(timer.current);
+    // Don't poll in a background tab; refresh right away when it comes back.
+    const onVis = () => {
+      if (document.visibilityState === 'visible') poll();
+      else clearTimeout(timer.current);
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      clearTimeout(timer.current);
+      document.removeEventListener('visibilitychange', onVis);
+    };
   }, [poll]);
 
   const run = async () => {
