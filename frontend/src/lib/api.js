@@ -59,6 +59,7 @@ export const api = {
   syncStatus: () => request('GET', '/api/sync/status'),
   syncRun: () => request('POST', '/api/sync/run'),
   syncChat: (id) => request('POST', `/api/chats/${id}/sync`),
+  retryFailed: () => request('POST', '/api/media/retry-failed'),
 };
 
 /** URL for a file stored on the VM disk (served by nginx). */

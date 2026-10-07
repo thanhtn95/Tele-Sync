@@ -12,7 +12,7 @@ Usage = namedtuple("Usage", "total used free")
 
 
 async def test_status_media_and_disk(api, pool, monkeypatch):  # noqa: F811
-    monkeypatch.setattr(main_mod, "_media_stats_cache", {"at": 0.0, "value": None})
+    monkeypatch.setattr(main_mod, "_media_stats_cache", {"at": 0.0, "value": None, "epoch": 0})
     await _add_chat(pool)
     _populate(api.tg)
     api.gp.fail_tokens = {"tok-0"}
@@ -27,7 +27,8 @@ async def test_status_media_and_disk(api, pool, monkeypatch):  # noqa: F811
     m = st["media"]
     # photos 4,5 + video 10 -> Google Photos (4 failed); voice, sticker local; pdf skipped; 99 waiting
     assert m == {"in_gphotos": 2, "on_disk": 2, "failed": 1, "skipped": 1, "not_downloaded": 1,
-                 "top_errors": [{"reason": "boom", "n": 1}]}
+                 "top_errors": [{"reason": "boom", "n": 1}],
+                 "failed_by_chat": [{"chat_id": CHAT_ID, "title": "Test Group", "n": 1}]}
     d = st["disk"]
     assert d["total"] > 0 and d["used"] + d["free"] <= d["total"] and 0 <= d["percent"] <= 100
     assert st["disk_low"] is False

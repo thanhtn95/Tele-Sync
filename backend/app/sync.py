@@ -68,6 +68,8 @@ class SyncState:
     flood_wait_until: dt.datetime | None = None
     last_error: str | None = None
     disk_low: bool = False  # downloads paused because the disk is almost full
+    retrying_failed: bool = False  # "Retry failed" asked for or running
+    media_epoch: int = 0  # bumped after a retry, so the status recounts media right away
     chat_errors: dict[int, str] = field(default_factory=dict)
 
 
@@ -87,6 +89,7 @@ class SyncWorker:
         self._wake = asyncio.Event()
         self._full = False  # a full pass was asked for ("Sync now")
         self._requested: list[int] = []  # single chats asked for, in order
+        self._retry_failed = False  # "Retry failed": failed media in every chat
         self._known_users: set[int] = set()
         self._lock = asyncio.Lock()
 
@@ -101,6 +104,12 @@ class SyncWorker:
         """Sync one chat soon: next in a running pass, otherwise right away (no full pass)."""
         if chat_id not in self._requested:
             self._requested.append(chat_id)
+        self._wake.set()
+
+    def request_failed_retry(self) -> None:
+        """Retry failed media in every chat soon, whatever its sync settings."""
+        self._retry_failed = True
+        self.state.retrying_failed = True
         self._wake.set()
 
     @property
@@ -128,7 +137,7 @@ class SyncWorker:
                 next_full = loop.time() + interval if interval > 0 else float("inf")
                 self.state.next_pass_at = _now() + dt.timedelta(seconds=interval) if interval > 0 else None
             self._wake.clear()
-            if self._full or self._requested:  # asked for while the pass was finishing
+            if self._full or self._requested or self._retry_failed:  # asked for while the pass was finishing
                 continue
             timeout = None if next_full == float("inf") else max(0.0, next_full - loop.time())
             try:
@@ -167,7 +176,10 @@ class SyncWorker:
                     )
                 ]
                 done: set[int] = set()
-                while self._requested or queue:
+                while self._requested or queue or self._retry_failed:
+                    if self._retry_failed:
+                        await self._retry_all_failed()
+                        continue
                     chat_id = self._requested.pop(0) if self._requested else queue.pop(0)
                     if chat_id in done:
                         continue
@@ -507,8 +519,40 @@ class SyncWorker:
             else:
                 await self._set_media(ctx.chat_id, p.message_id, error=(res.error or "unknown")[:500])
 
-    async def _retry_media(self, entity, ctx: "_ChatCtx") -> None:
-        """Retry failed downloads/uploads and backfill media synced while sync_media was off.
+    async def _retry_all_failed(self) -> None:
+        """Retry failed media in every chat, including chats whose sync or media is now off
+        (a normal pass only retries chats with both on, so old failures there stayed failed)."""
+        self._retry_failed = False
+        st = self.state
+        try:
+            chats = await self.pool.fetch(
+                """
+                SELECT c.* FROM chats c
+                WHERE EXISTS (SELECT 1 FROM media m WHERE m.chat_id = c.chat_id
+                                AND m.gphotos_media_id IS NULL AND m.file_path IS NULL
+                                AND m.error IS NOT NULL AND m.error NOT LIKE 'skipped:%')
+                ORDER BY c.chat_id
+                """
+            )
+            for chat in chats:
+                st.current_chat_id = chat["chat_id"]
+                st.current_chat_title = f"{chat['title']} (retrying failed media)"
+                st.progress = 0
+                try:
+                    entity = await self._resolve(chat["chat_id"])
+                    await self._retry_media(entity, _ChatCtx(chat), failed_only=True)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    log.exception("retrying failed media of chat %s failed", chat["chat_id"])
+                    st.chat_errors[chat["chat_id"]] = f"{type(e).__name__}: {e}"
+        finally:
+            st.retrying_failed = self._retry_failed
+            st.media_epoch += 1
+
+    async def _retry_media(self, entity, ctx: "_ChatCtx", failed_only: bool = False) -> None:
+        """Retry failed downloads/uploads and backfill media synced while sync_media was off
+        (only the failed ones with `failed_only`).
 
         Walks all pending rows once per pass, RETRY_LIMIT at a time; anything that fails
         again is left for the next pass.
@@ -521,9 +565,10 @@ class SyncWorker:
                 WHERE chat_id = $1 AND message_id > $3
                   AND gphotos_media_id IS NULL AND file_path IS NULL
                   AND (error IS NULL OR error NOT LIKE 'skipped:%')
+                  AND (error IS NOT NULL OR NOT $4)
                 ORDER BY message_id LIMIT $2
                 """,
-                ctx.chat_id, RETRY_LIMIT, after,
+                ctx.chat_id, RETRY_LIMIT, after, failed_only,
             )
             if not rows:
                 break

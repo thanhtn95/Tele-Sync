@@ -36,7 +36,9 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
     served by nginx at `/files/`.
   * Without Google Photos credentials, photos/videos are stored on disk as well.
   * Failed downloads/uploads are recorded in `media.error` and retried on later passes
-    (≤100 per chat per pass). Turning *include media* on later backfills older messages.
+    (in chats with sync and *include media* on, 100 at a time). *Retry failed in all
+    chats* in the status box (`POST /api/media/retry-failed`) retries every failed file,
+    whatever the chat's settings now. Turning *include media* on later backfills older messages.
     Files over `MAX_FILE_MB` are skipped.
 * **Viewer** (`#/chat/<id>`): virtualized reverse-scrolling list that loads older pages
   as you scroll up. Date separators, left/right bubbles, sender names + avatars in groups,
@@ -56,7 +58,7 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
   30 min) and the open chat picks them up within a few seconds. Media in live messages is
   fetched by the next sync.
 * **Status box health**: media counts (in Google Photos / on disk / not downloaded /
-  skipped / failed, with the top failure reasons) and VM disk usage (same Use% as `df`,
+  skipped / failed, with the top failure reasons and the chats they're in) and VM disk usage (same Use% as `df`,
   orange at 80%, red at 90%). Below 1.5 GB free the sync pauses downloads instead of
   filling the disk (a full disk would also stop Postgres); paused files retry later.
 * **Hide media** (👁/🙈 in the header, remembered per browser) for using the app in
@@ -100,6 +102,7 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
 | GET | `/api/sync/status` | worker state + per-chat last sync / message count / error |
 | POST | `/api/sync/run` | trigger a pass now |
 | POST | `/api/chats/{chat_id}/sync` | sync one chat now (409 if its sync is off) |
+| POST | `/api/media/retry-failed` | retry failed media in every chat |
 
 Chat ids are Telethon "marked" ids (`-100…` for channels/supergroups). `grouped_id` is
 returned as a string because it does not fit in a JS number.

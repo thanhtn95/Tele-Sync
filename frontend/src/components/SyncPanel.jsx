@@ -5,7 +5,7 @@ import { formatAgo, formatSize } from '../lib/format.js';
 const num = (n) => (n ?? 0).toLocaleString();
 
 /** Where the archived media lives, and why some of it isn't stored. */
-function MediaHealth({ m }) {
+function MediaHealth({ m, retrying, onRetry }) {
   const [open, setOpen] = useState(false);
   if (!m) return null;
   const parts = [
@@ -28,14 +28,30 @@ function MediaHealth({ m }) {
           </>
         )}
       </span>
-      {open && m.top_errors?.length > 0 && (
+      {open && m.failed > 0 && (
         <ul className="health-reasons">
-          {m.top_errors.map((e) => (
+          {m.top_errors?.map((e) => (
             <li key={e.reason}>
               <strong>{num(e.n)}×</strong> {e.reason}
             </li>
           ))}
-          <li className="muted">Failed files are retried on each sync of chats with sync and “Include media” on.</li>
+          {m.failed_by_chat?.length > 0 && (
+            <li className="muted">
+              In:{' '}
+              {m.failed_by_chat.map((c, i) => (
+                <React.Fragment key={c.chat_id}>
+                  {i > 0 && ', '}
+                  <a href={`#/chat/${c.chat_id}/media`}>{c.title || c.chat_id}</a> ({num(c.n)})
+                </React.Fragment>
+              ))}
+            </li>
+          )}
+          <li className="muted">
+            Each sync retries them only in chats with sync and “Include media” on.{' '}
+            <button className="link-btn" onClick={onRetry} disabled={retrying}>
+              {retrying ? 'Retrying…' : 'Retry failed in all chats'}
+            </button>
+          </li>
         </ul>
       )}
     </div>
@@ -82,7 +98,7 @@ export default function SyncPanel({ onStatus, refreshKey }) {
       onStatusRef.current?.(s);
       // Fast while syncing, slow when idle, and paused while the tab is hidden (see below):
       // every request is billed VM traffic.
-      timer.current = setTimeout(poll, s.running || s.queued_chat_ids?.length ? 5000 : 60000);
+      timer.current = setTimeout(poll, s.running || s.queued_chat_ids?.length || s.retrying_failed ? 5000 : 60000);
     } catch (e) {
       setErr(e.message);
       timer.current = setTimeout(poll, 60000);
@@ -118,6 +134,15 @@ export default function SyncPanel({ onStatus, refreshKey }) {
     }
   };
 
+  const retryFailed = async () => {
+    try {
+      await api.retryFailed();
+      setTimeout(poll, 500);
+    } catch (e) {
+      setErr(e.message);
+    }
+  };
+
   if (!st) return <div className="sync-panel muted">{err ?? 'Loading status…'}</div>;
 
   return (
@@ -146,7 +171,7 @@ export default function SyncPanel({ onStatus, refreshKey }) {
       )}
       {!st.gphotos_enabled && <div className="muted small">Google Photos not configured: photos/videos are kept on disk.</div>}
       {st.last_error && <div className="err small">{st.last_error}</div>}
-      <MediaHealth m={st.media} />
+      <MediaHealth m={st.media} retrying={st.retrying_failed} onRetry={retryFailed} />
       <DiskHealth d={st.disk} low={st.disk_low} />
       {err && <div className="err small">{err}</div>}
     </div>
