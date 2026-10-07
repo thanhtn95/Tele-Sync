@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -21,6 +22,10 @@ log = logging.getLogger(__name__)
 
 # Persist the cursor (and flush pending Google Photos items) every N messages.
 CHECKPOINT_EVERY = 50
+# Stop downloading files when the disk would drop below this much free space: a full
+# disk would also stop Postgres. Such files are retried once space is freed.
+DISK_RESERVE_BYTES = 1536 * 1024 * 1024
+
 # Media rows retried/backfilled per chat per pass.
 RETRY_LIMIT = 100
 
@@ -62,6 +67,7 @@ class SyncState:
     next_pass_at: dt.datetime | None = None
     flood_wait_until: dt.datetime | None = None
     last_error: str | None = None
+    disk_low: bool = False  # downloads paused because the disk is almost full
     chat_errors: dict[int, str] = field(default_factory=dict)
 
 
@@ -380,6 +386,14 @@ class SyncWorker:
             await self._set_media(chat_id, mid, error=f"skipped: larger than MAX_FILE_MB ({info.size} bytes)")
             return
 
+        free = self.disk_free()
+        if free is not None and free - (info.size or 0) < DISK_RESERVE_BYTES:
+            self.state.disk_low = True
+            # Not "skipped:" so the retry step tries again once space is freed.
+            await self._set_media(chat_id, mid, error=f"Disk almost full ({free / 2**30:.1f} GB free)")
+            return
+        self.state.disk_low = False
+
         if self._use_gphotos(info):
             self.s.temp_dir.mkdir(parents=True, exist_ok=True)
             tmp = self.s.temp_dir / f"{chat_id}_{mid}{info.ext}"
@@ -416,6 +430,13 @@ class SyncWorker:
             log.warning("download of %s/%s failed: %s", chat_id, mid, e)
             part.unlink(missing_ok=True)
             await self._set_media(chat_id, mid, error=f"{type(e).__name__}: {e}"[:500])
+
+    def disk_free(self) -> int | None:
+        try:
+            self.s.media_dir.mkdir(parents=True, exist_ok=True)
+            return shutil.disk_usage(self.s.media_dir).free
+        except OSError:
+            return None
 
     async def _flush_uploads(self, ctx: "_ChatCtx") -> None:
         if not ctx.pending or self.gphotos is None:

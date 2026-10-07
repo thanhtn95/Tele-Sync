@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import shutil
+import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -575,6 +577,52 @@ async def gphotos_urls(body: UrlsRequest, request: Request):
 
 # ---- sync -----------------------------------------------------------------
 
+_media_stats_cache: dict = {"at": 0.0, "value": None}
+MEDIA_STATS_TTL = 60  # the status box polls every few seconds; counting can wait a minute
+
+
+async def media_stats(pool) -> dict:
+    """Where media files are: Google Photos, VM disk, failed, or not downloaded (yet)."""
+    now = time.monotonic()
+    if _media_stats_cache["value"] is not None and now - _media_stats_cache["at"] < MEDIA_STATS_TTL:
+        return _media_stats_cache["value"]
+    counts = await pool.fetchrow(
+        """
+        SELECT count(*) FILTER (WHERE gphotos_media_id IS NOT NULL) AS in_gphotos,
+               count(*) FILTER (WHERE file_path IS NOT NULL) AS on_disk,
+               count(*) FILTER (WHERE gphotos_media_id IS NULL AND file_path IS NULL
+                                AND error IS NOT NULL AND error NOT LIKE 'skipped:%') AS failed,
+               count(*) FILTER (WHERE error LIKE 'skipped:%') AS skipped,
+               count(*) FILTER (WHERE gphotos_media_id IS NULL AND file_path IS NULL
+                                AND error IS NULL) AS not_downloaded
+        FROM media
+        """
+    )
+    reasons = await pool.fetch(
+        """
+        SELECT left(regexp_replace(error, '\\s+', ' ', 'g'), 140) AS reason, count(*) AS n
+        FROM media
+        WHERE gphotos_media_id IS NULL AND file_path IS NULL
+          AND error IS NOT NULL AND error NOT LIKE 'skipped:%'
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 3
+        """
+    )
+    value = {**dict(counts), "top_errors": [dict(r) for r in reasons]}
+    _media_stats_cache.update(at=now, value=value)
+    return value
+
+
+def disk_stats() -> dict | None:
+    try:
+        settings.media_dir.mkdir(parents=True, exist_ok=True)
+        u = shutil.disk_usage(settings.media_dir)
+    except OSError:
+        return None
+    # Same "Use%" as df: space reserved for root counts as neither used nor free.
+    usable = (u.used + u.free) or 1
+    return {"total": u.total, "used": u.used, "free": u.free, "percent": round(u.used * 100 / usable, 1)}
+
+
 @app.get("/api/sync/status")
 async def sync_status(request: Request, pool=Depends(pool_dep)):
     worker: SyncWorker = request.app.state.worker
@@ -601,6 +649,9 @@ async def sync_status(request: Request, pool=Depends(pool_dep)):
         "telegram_authorised": authorised,
         "gphotos_enabled": request.app.state.gphotos is not None,
         "chats": [{**_chat_out(r), "error": st.chat_errors.get(r["chat_id"])} for r in rows],
+        "media": await media_stats(pool),
+        "disk": disk_stats(),
+        "disk_low": st.disk_low,
     }
 
 

@@ -51,6 +51,10 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
   New and edited messages of synced chats are saved live from Telegram (not only every
   30 min) and the open chat picks them up within a few seconds. Media in live messages is
   fetched by the next sync.
+* **Status box health**: media counts (in Google Photos / on disk / not downloaded /
+  skipped / failed, with the top failure reasons) and VM disk usage (same Use% as `df`,
+  orange at 80%, red at 90%). Below 1.5 GB free the sync pauses downloads instead of
+  filling the disk (a full disk would also stop Postgres); paused files retry later.
 * **Hide media** (👁/🙈 in the header, remembered per browser) for using the app in
   public: photos, videos, GIFs, stickers, albums, profile pictures and pinned thumbnails
   are replaced by small labels and aren't even downloaded; tap a label to show one item.

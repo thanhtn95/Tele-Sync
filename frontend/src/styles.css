@@ -1389,3 +1389,49 @@ mark.hl {
   background: var(--code-bg);
   border-radius: 8px;
 }
+
+/* ---------- status box: media + disk health ---------- */
+.health {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: 2px 8px;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+  margin-top: 2px;
+}
+.health > :not(.health-label) {
+  grid-column: 2;
+}
+.health-label {
+  color: var(--muted);
+  font-weight: 600;
+}
+.health .link-btn {
+  font-size: inherit;
+}
+.health-reasons {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 3px;
+  overflow-wrap: anywhere;
+}
+.meter {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--code-bg);
+  overflow: hidden;
+}
+.meter span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: #4caf50;
+}
+.meter.warn span {
+  background: var(--warn);
+}
+.meter.bad span {
+  background: var(--err);
+}
