@@ -16,15 +16,35 @@ async def _init_conn(conn: asyncpg.Connection) -> None:
     await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
 
 
+# A web request's query may run at most this long, so a slow one fails cleanly instead of
+# piling up while the page keeps polling. Migrations and VACUUM lift it explicitly.
+STATEMENT_TIMEOUT_MS = 30_000
+
+
 async def create_pool(dsn: str) -> asyncpg.Pool:
     # Small pool: the VM has 1 GB RAM and there is a single user.
-    return await asyncpg.create_pool(dsn, min_size=1, max_size=5, init=_init_conn)
+    return await asyncpg.create_pool(
+        dsn, min_size=1, max_size=5, init=_init_conn,
+        server_settings={"statement_timeout": str(STATEMENT_TIMEOUT_MS)},
+    )
+
+
+async def vacuum_after_migrations(pool: asyncpg.Pool) -> None:
+    """Migrations can rewrite big tables; until VACUUM rebuilds the visibility map,
+    index-only scans must read every row from disk (very slow on a standard disk).
+    VACUUM cannot run inside a transaction, so it runs here, after migrate()."""
+    async with pool.acquire() as conn:
+        await conn.execute("SET statement_timeout = 0")
+        for table in ("messages", "media", "chats"):
+            log.info("VACUUM ANALYZE %s (after migrations)…", table)
+            await conn.execute(f"VACUUM (ANALYZE) {table}")
 
 
 async def migrate(pool: asyncpg.Pool) -> list[str]:
     """Apply migrations/NNN_*.sql files not yet recorded in schema_migrations."""
     applied: list[str] = []
     async with pool.acquire() as conn:
+        await conn.execute("SET statement_timeout = 0")  # rewrites/index builds can be slow
         await conn.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations ("
             " name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"

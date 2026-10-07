@@ -233,11 +233,13 @@ class SyncWorker:
         """Flush pending uploads, persist cursor. Returns False if the chat got disabled."""
         await self._flush_uploads(ctx)
         ctx.seen_since_checkpoint = 0
+        new, ctx.new_messages = ctx.new_messages, 0
         row = await self.pool.fetchrow(
             "UPDATE chats SET last_msg_id = GREATEST(COALESCE(last_msg_id, 0), $2),"
-            " last_synced_at = CASE WHEN $3 THEN now() ELSE last_synced_at END"
+            " last_synced_at = CASE WHEN $3 THEN now() ELSE last_synced_at END,"
+            " message_count = message_count + $4"
             " WHERE chat_id = $1 RETURNING sync_enabled",
-            ctx.chat_id, cursor, finished,
+            ctx.chat_id, cursor, finished, new,
         )
         return bool(row and row["sync_enabled"])
 
@@ -245,17 +247,19 @@ class SyncWorker:
 
     async def process_message(self, msg, ctx: "_ChatCtx") -> None:
         await self._upsert_sender(msg)
-        await self.save_message(msg, ctx.chat_id)
+        if await self.save_message(msg, ctx.chat_id):
+            ctx.new_messages += 1
         info = classify(msg)
         if info is not None:
             await self._save_media_meta(ctx.chat_id, msg.id, info)
             if ctx.sync_media:
                 await self._store_media(msg, info, ctx)
 
-    async def save_message(self, msg, chat_id: int) -> None:
+    async def save_message(self, msg, chat_id: int) -> bool:
+        """Upsert one message. Returns True if it was new (not an update)."""
         raw = jsonable(msg.to_dict())
         text = msg.message if isinstance(getattr(msg, "message", None), str) else None
-        await self.pool.execute(
+        return await self.pool.fetchval(
             """
             INSERT INTO messages (chat_id, message_id, sender_id, date, text, reply_to,
                                   grouped_id, fwd_from_name, edit_date, raw, out, pinned)
@@ -265,6 +269,7 @@ class SyncWorker:
               reply_to = EXCLUDED.reply_to, grouped_id = EXCLUDED.grouped_id,
               fwd_from_name = EXCLUDED.fwd_from_name, edit_date = EXCLUDED.edit_date,
               raw = EXCLUDED.raw, out = EXCLUDED.out, pinned = EXCLUDED.pinned
+            RETURNING (xmax = 0) AS inserted
             """,
             chat_id, msg.id, msg.sender_id, msg.date,
             text.replace("\x00", "") if text else text,
@@ -465,3 +470,4 @@ class _ChatCtx:
         self.album_id: str | None = chat["gphotos_album_id"]
         self.pending: list[_Pending] = []
         self.seen_since_checkpoint = 0
+        self.new_messages = 0  # inserted since the last checkpoint (for chats.message_count)
