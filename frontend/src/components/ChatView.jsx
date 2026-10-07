@@ -3,6 +3,7 @@ import { Virtuoso } from 'react-virtuoso';
 import { api } from '../lib/api.js';
 import { dayKey, formatDay } from '../lib/format.js';
 import ChatSearch from './ChatSearch.jsx';
+import Composer from './Composer.jsx';
 import MediaPanel from './MediaPanel.jsx';
 import MediaViewer from './MediaViewer.jsx';
 import MessageBubble from './Message.jsx';
@@ -70,6 +71,7 @@ export default function ChatView({ chatId, tab = 'chat' }) {
   const [pinIndex, setPinIndex] = useState(0);
   const [counts, setCounts] = useState(null);
   const [viewer, setViewer] = useState(null);
+  const [replyTo, setReplyTo] = useState(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
   const virtuoso = useRef(null);
@@ -132,6 +134,7 @@ export default function ChatView({ chatId, tab = 'chat' }) {
     setCounts(null);
     setSearchOpen(false);
     setQuery('');
+    setReplyTo(null);
     api.chat(chatId).then((c) => alive && setChat(c), (e) => alive && setError(e.message));
     api.pinned(chatId).then((p) => alive && setPins(p), () => {});
     api.chatMedia(chatId, { limit: 1 }).then((r) => alive && setCounts(r.counts), () => {});
@@ -174,6 +177,45 @@ export default function ChatView({ chatId, tab = 'chat' }) {
       setMessages(merged);
     });
   }, [chatId, withLoading]);
+
+  // Live chat: while the window is at the latest message, fetch anything newer every few
+  // seconds (messages you send here, and ones the server receives live from Telegram).
+  const pollNew = useCallback(async () => {
+    const s = state.current;
+    if (s.loading || s.hasNewer || !s.messages.length) return;
+    const lastId = s.messages[s.messages.length - 1].id;
+    try {
+      const res = await api.messagesAfter(chatId, lastId, 100);
+      const cur = state.current;
+      if (cur.hasNewer || !cur.messages.length || cur.messages[cur.messages.length - 1].id !== lastId) return;
+      const fresh = [...res.messages].reverse().filter((m) => m.id > lastId);
+      if (!fresh.length) return;
+      const merged = [...cur.messages, ...fresh];
+      cur.messages = merged;
+      setMessages(merged);
+      if (res.has_newer) setHasNewer(true);
+    } catch {
+      /* offline for a moment: next tick retries */
+    }
+  }, [chatId]);
+
+  useEffect(() => {
+    if (tab !== 'chat') return undefined;
+    const t = setInterval(() => document.visibilityState === 'visible' && pollNew(), 4000);
+    return () => clearInterval(t);
+  }, [tab, pollNew]);
+
+  const onSent = useCallback(async () => {
+    setReplyTo(null);
+    if (state.current.hasNewer) {
+      await openWindow(null); // was browsing history: jump to the latest, which includes it
+      return;
+    }
+    await pollNew();
+    requestAnimationFrame(() =>
+      virtuoso.current?.scrollToIndex({ index: buildRows(state.current.messages).length - 1, align: 'end' }),
+    );
+  }, [openWindow, pollNew]);
 
   // Jump to any message: scroll if loaded, otherwise load a window around it.
   const pendingJump = useRef(null);
@@ -267,6 +309,7 @@ export default function ChatView({ chatId, tab = 'chat' }) {
           highlighted={highlight && row.msgs.some((m) => m.id === highlight.id)}
           onJump={jumpTo}
           onOpen={setViewer}
+          onReply={setReplyTo}
           query={query}
         />
       );
@@ -329,6 +372,7 @@ export default function ChatView({ chatId, tab = 'chat' }) {
             startReached={loadOlder}
             endReached={loadNewer}
             atBottomStateChange={setAtBottom}
+            followOutput={(bottom) => (bottom ? 'smooth' : false)}
             rangeChanged={onRangeChanged}
             itemContent={itemContent}
             alignToBottom
@@ -355,6 +399,9 @@ export default function ChatView({ chatId, tab = 'chat' }) {
           </div>
         )}
       </div>
+      {tab === 'chat' && !searchOpen && messages.length > 0 && (
+        <Composer chatId={chatId} replyTo={replyTo} onCancelReply={() => setReplyTo(null)} onSent={onSent} />
+      )}
       {viewer && (
         <MediaViewer chatId={chatId} start={viewer} onClose={() => setViewer(null)} onShowInChat={showInChat} />
       )}

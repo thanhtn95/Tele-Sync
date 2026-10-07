@@ -108,6 +108,17 @@ class FakeTG(TelegramClient):
         Path(file).write_bytes(b"avatar")
         return file
 
+    async def send_message(self, entity, text, reply_to=None, parse_mode=()):
+        from telethon.errors import ChatWriteForbiddenError
+        if getattr(self, "forbid_send", False):
+            raise ChatWriteForbiddenError(request=None)
+        self.sent = getattr(self, "sent", []) + [(text, reply_to, parse_mode)]
+        mid = max((m.id for m in self.messages), default=0) + 1
+        kw = {"reply_to": types.MessageReplyHeader(reply_to_msg_id=reply_to)} if reply_to else {}
+        m = make_msg(self, mid, 111, text, out=True, **kw)
+        self.messages.append(m)
+        return m
+
     async def iter_dialogs(self):
         for d in self.dialogs:
             yield d

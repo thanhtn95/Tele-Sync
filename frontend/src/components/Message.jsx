@@ -68,7 +68,7 @@ function AlbumGrid({ msgs, onOpen }) {
 /**
  * One bubble. `msgs` has several entries for an album (same grouped_id).
  */
-export default function MessageBubble({ msgs, showName, showAvatar, isGroup, highlighted, onJump, onOpen, query }) {
+export default function MessageBubble({ msgs, showName, showAvatar, isGroup, highlighted, onJump, onOpen, query, onReply }) {
   const first = msgs[0];
   const last = msgs[msgs.length - 1];
 
@@ -105,7 +105,18 @@ export default function MessageBubble({ msgs, showName, showAvatar, isGroup, hig
   const out = first.out;
 
   return (
-    <div className={`row ${out ? 'out' : 'in'}${highlighted ? ' highlight' : ''}`}>
+    <div
+      className={`row ${out ? 'out' : 'in'}${highlighted ? ' highlight' : ''}`}
+      onContextMenu={
+        onReply
+          ? (e) => {
+              // long-press on a phone / right-click on a computer = reply
+              e.preventDefault();
+              onReply(captioned);
+            }
+          : undefined
+      }
+    >
       {isGroup && !out && (
         <div className="avatar-slot">
           {showAvatar && <Avatar name={first.sender_name} path={first.sender_avatar} id={first.sender_id} />}
@@ -133,6 +144,11 @@ export default function MessageBubble({ msgs, showName, showAvatar, isGroup, hig
           <div className="text">
             <RichText text={captioned.text} entities={captioned.entities} highlight={query} />
           </div>
+        )}
+        {onReply && (
+          <button className="bubble-reply-btn" onClick={() => onReply(captioned)} aria-label="Reply" title="Reply">
+            ↩
+          </button>
         )}
         <span className="time" title={new Date(last.date).toLocaleString()}>
           {msgs.some((m) => m.pinned) && (

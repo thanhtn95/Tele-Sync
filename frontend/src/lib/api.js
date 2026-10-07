@@ -26,6 +26,8 @@ export const api = {
   dialogs: (refresh = false) => request('GET', `/api/dialogs${refresh ? '?refresh=true' : ''}`),
   chat: (id) => request('GET', `/api/chats/${id}`),
   patchChat: (id, patch) => request('PATCH', `/api/chats/${id}`, patch),
+  send: (id, text, replyTo) =>
+    request('POST', `/api/chats/${id}/send`, replyTo ? { text, reply_to: replyTo } : { text }),
   pinned: (id) => request('GET', `/api/chats/${id}/pinned`),
   messages: (id, before, limit = 50) =>
     request('GET', `/api/chats/${id}/messages?limit=${limit}${before != null ? `&before=${before}` : ''}`),

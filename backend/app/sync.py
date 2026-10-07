@@ -255,6 +255,26 @@ class SyncWorker:
             if ctx.sync_media:
                 await self._store_media(msg, info, ctx)
 
+    async def save_live(self, msg, chat_id: int) -> bool:
+        """Store one message right away (sent from the web app, or a live Telegram update).
+
+        Text, sender and media metadata are saved now; the media file itself is fetched by
+        the next sync pass (its retry step picks up media rows without a stored file), so a
+        big download never delays the chat. Returns False if the chat isn't in the DB.
+        """
+        chat = await self.pool.fetchrow("SELECT * FROM chats WHERE chat_id = $1", chat_id)
+        if chat is None:
+            return False
+        ctx = _ChatCtx(chat)
+        ctx.sync_media = False  # metadata only here
+        await self.process_message(msg, ctx)
+        if ctx.new_messages:
+            await self.pool.execute(
+                "UPDATE chats SET message_count = message_count + $2 WHERE chat_id = $1",
+                chat_id, ctx.new_messages,
+            )
+        return True
+
     async def save_message(self, msg, chat_id: int) -> bool:
         """Upsert one message. Returns True if it was new (not an update)."""
         raw = jsonable(msg.to_dict())

@@ -13,7 +13,8 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from telethon import utils
+from telethon import events, utils
+from telethon.errors import FloodWaitError, RPCError
 
 from . import auth, db
 from .config import settings
@@ -54,6 +55,8 @@ async def lifespan(app: FastAPI):
 
     worker = SyncWorker(pool, client, gphotos, settings)
     task = asyncio.create_task(worker.run_forever(), name="sync-worker")
+    if client is not None:
+        _register_live_updates(client, worker)
     app.state.pool, app.state.client, app.state.gphotos, app.state.worker = pool, client, gphotos, worker
     app.state.dialogs_lock = asyncio.Lock()
     try:
@@ -69,6 +72,23 @@ async def lifespan(app: FastAPI):
         if gphotos:
             await gphotos.aclose()
         await pool.close()
+
+
+def _register_live_updates(client, worker: SyncWorker) -> None:
+    """Save new/edited messages of synced chats as they happen (seconds, not 30 min)."""
+
+    async def on_message(event):
+        try:
+            enabled = await worker.pool.fetchval(
+                "SELECT sync_enabled FROM chats WHERE chat_id = $1", event.chat_id
+            )
+            if enabled:
+                await worker.save_live(event.message, event.chat_id)
+        except Exception:  # never let one bad update kill the handler
+            log.exception("live update for chat %s failed", event.chat_id)
+
+    client.add_event_handler(on_message, events.NewMessage())
+    client.add_event_handler(on_message, events.MessageEdited())
 
 
 app = FastAPI(title="Telegram Archiver", lifespan=lifespan)
@@ -486,6 +506,34 @@ async def get_media(
         chat_id,
     ) if before is None and after is None else None
     return {"items": items, "has_more": has_more, "counts": dict(counts) if counts else None}
+
+
+class SendRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=4096)  # Telegram's message limit
+    reply_to: int | None = None
+
+
+@app.post("/api/chats/{chat_id}/send")
+async def send_message(chat_id: int, body: SendRequest, request: Request, pool=Depends(pool_dep)):
+    """Send a text message to the chat as you (your Telegram account), then store it."""
+    client = await _require_tg(request)
+    worker: SyncWorker = request.app.state.worker
+    if not await pool.fetchval("SELECT EXISTS (SELECT 1 FROM chats WHERE chat_id = $1)", chat_id):
+        raise HTTPException(404, "chat not found")
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(422, "empty message")
+    try:
+        entity = await worker._resolve(chat_id)
+        # parse_mode=None: send exactly what was typed (no markdown surprises with * or _)
+        msg = await client.send_message(entity, text, reply_to=body.reply_to, parse_mode=None)
+    except FloodWaitError as e:
+        raise HTTPException(429, f"Telegram rate limit: try again in {e.seconds}s")
+    except RPCError as e:
+        # e.g. CHAT_WRITE_FORBIDDEN in a channel where you can't post
+        raise HTTPException(400, f"Telegram refused the message: {e.message or type(e).__name__}")
+    await worker.save_live(msg, chat_id)
+    return {"id": msg.id}
 
 
 @app.get("/api/chats/{chat_id}/pinned")
