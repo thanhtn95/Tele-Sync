@@ -58,6 +58,7 @@ export const api = {
   gphotosUrls: (mediaIds, force = false) => request('POST', '/api/gphotos/urls', { media_ids: mediaIds, force }),
   syncStatus: () => request('GET', '/api/sync/status'),
   syncRun: () => request('POST', '/api/sync/run'),
+  syncChat: (id) => request('POST', `/api/chats/${id}/sync`),
 };
 
 /** URL for a file stored on the VM disk (served by nginx). */

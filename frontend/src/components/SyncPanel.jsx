@@ -65,7 +65,8 @@ function DiskHealth({ d, low }) {
   );
 }
 
-export default function SyncPanel({ onStatus }) {
+/** `refreshKey` changes when something else queued sync work, so the status refreshes soon. */
+export default function SyncPanel({ onStatus, refreshKey }) {
   const [st, setSt] = useState(null);
   const [err, setErr] = useState(null);
   const timer = useRef(null);
@@ -81,7 +82,7 @@ export default function SyncPanel({ onStatus }) {
       onStatusRef.current?.(s);
       // Fast while syncing, slow when idle, and paused while the tab is hidden (see below):
       // every request is billed VM traffic.
-      timer.current = setTimeout(poll, s.running ? 5000 : 60000);
+      timer.current = setTimeout(poll, s.running || s.queued_chat_ids?.length ? 5000 : 60000);
     } catch (e) {
       setErr(e.message);
       timer.current = setTimeout(poll, 60000);
@@ -101,6 +102,12 @@ export default function SyncPanel({ onStatus }) {
       document.removeEventListener('visibilitychange', onVis);
     };
   }, [poll]);
+
+  useEffect(() => {
+    if (!refreshKey) return undefined;
+    const t = setTimeout(poll, 500);
+    return () => clearTimeout(t);
+  }, [refreshKey, poll]);
 
   const run = async () => {
     try {

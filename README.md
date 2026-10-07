@@ -17,12 +17,16 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
   via `PATCH /api/chats/{id}`. The gear opens per-chat settings: *include media* and
   *sync since* date. The status panel polls `GET /api/sync/status`.
 * **Sync worker**: a single asyncio task. Every `SYNC_INTERVAL_SECONDS` (or on
-  "Sync now" / `POST /api/sync/run`, or when a chat is enabled) it walks chats with
+  "Sync now" / `POST /api/sync/run`) it walks chats with
   `sync_enabled`, calling `iter_messages(min_id=last_msg_id, reverse=True, offset_date=sync_since)`.
   Messages are upserted (`ON CONFLICT … DO UPDATE`, so re-fetches capture edits), senders
   go to `users` (avatar downloaded once), and the cursor `last_msg_id` is persisted every
   50 messages, so a crash or restart resumes where it stopped. `FloodWaitError` →
   checkpoint, sleep `e.seconds`, continue.
+* **Sync one chat now**: the ↻ on a synced chat's row (`POST /api/chats/{id}/sync`, also
+  done when a chat is switched on) queues just that chat: it runs right away when idle,
+  or next during a full pass, and doesn't move the scheduled full pass. The row shows
+  *queued…* / *syncing…* meanwhile.
 * **Media**: metadata (size, dimensions, duration, stripped thumbnail) is always stored.
   When *include media* is on:
   * photos / videos / GIFs → downloaded to `TEMP_DIR`, uploaded to Google Photos
@@ -95,6 +99,7 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
 | POST | `/api/gphotos/urls` `{media_ids, force?}` | fresh baseUrls (batchGet ≤50/call) |
 | GET | `/api/sync/status` | worker state + per-chat last sync / message count / error |
 | POST | `/api/sync/run` | trigger a pass now |
+| POST | `/api/chats/{chat_id}/sync` | sync one chat now (409 if its sync is off) |
 
 Chat ids are Telethon "marked" ids (`-100…` for channels/supergroups). `grouped_id` is
 returned as a string because it does not fit in a JS number.

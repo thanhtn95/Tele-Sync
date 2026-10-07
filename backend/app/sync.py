@@ -85,33 +85,59 @@ class SyncWorker:
         self.s = settings
         self.state = SyncState()
         self._wake = asyncio.Event()
+        self._full = False  # a full pass was asked for ("Sync now")
+        self._requested: list[int] = []  # single chats asked for, in order
         self._known_users: set[int] = set()
         self._lock = asyncio.Lock()
 
     # ---- scheduling -----------------------------------------------------
 
     def trigger(self) -> None:
+        """Run a full pass now."""
+        self._full = True
         self._wake.set()
+
+    def request_chat(self, chat_id: int) -> None:
+        """Sync one chat soon: next in a running pass, otherwise right away (no full pass)."""
+        if chat_id not in self._requested:
+            self._requested.append(chat_id)
+        self._wake.set()
+
+    @property
+    def queued_chat_ids(self) -> list[int]:
+        return list(self._requested)
 
     async def run_forever(self) -> None:
         interval = self.s.sync_interval_seconds
+        loop = asyncio.get_running_loop()
+        next_full = loop.time()  # first full pass right away
         while True:
+            full = self._full or loop.time() >= next_full
             try:
-                await self.run_pass()
+                if full:
+                    self._full = False
+                    await self.run_pass()
+                else:
+                    await self.run_pass(only_requested=True)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # never let the loop die
                 log.exception("sync pass crashed")
                 self.state.last_error = f"{type(e).__name__}: {e}"
+            if full:
+                next_full = loop.time() + interval if interval > 0 else float("inf")
+                self.state.next_pass_at = _now() + dt.timedelta(seconds=interval) if interval > 0 else None
             self._wake.clear()
-            timeout = interval if interval > 0 else None
-            self.state.next_pass_at = _now() + dt.timedelta(seconds=interval) if timeout else None
+            if self._full or self._requested:  # asked for while the pass was finishing
+                continue
+            timeout = None if next_full == float("inf") else max(0.0, next_full - loop.time())
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout)
             except asyncio.TimeoutError:
                 pass
 
-    async def run_pass(self) -> None:
+    async def run_pass(self, only_requested: bool = False) -> None:
+        """Sync every enabled chat (single-chat requests jump the queue), or only the requested ones."""
         if self._lock.locked():
             return
         async with self._lock:
@@ -130,13 +156,26 @@ class SyncWorker:
             st = self.state
             st.running = True
             st.last_error = None
-            st.last_pass_started_at = _now()
-            st.next_pass_at = None
+            if not only_requested:
+                st.last_pass_started_at = _now()
+                st.next_pass_at = None
             try:
-                chats = await self.pool.fetch(
-                    "SELECT * FROM chats WHERE sync_enabled ORDER BY last_synced_at NULLS FIRST, chat_id"
-                )
-                for chat in chats:
+                queue = [] if only_requested else [
+                    r["chat_id"]
+                    for r in await self.pool.fetch(
+                        "SELECT chat_id FROM chats WHERE sync_enabled ORDER BY last_synced_at NULLS FIRST, chat_id"
+                    )
+                ]
+                done: set[int] = set()
+                while self._requested or queue:
+                    chat_id = self._requested.pop(0) if self._requested else queue.pop(0)
+                    if chat_id in done:
+                        continue
+                    done.add(chat_id)
+                    # Fresh row: settings or the cursor may have changed since the pass started.
+                    chat = await self.pool.fetchrow("SELECT * FROM chats WHERE chat_id = $1 AND sync_enabled", chat_id)
+                    if chat is None:
+                        continue
                     st.current_chat_id = chat["chat_id"]
                     st.current_chat_title = chat["title"]
                     st.progress = 0
@@ -152,7 +191,8 @@ class SyncWorker:
                 st.running = False
                 st.current_chat_id = None
                 st.current_chat_title = None
-                st.last_pass_finished_at = _now()
+                if not only_requested:
+                    st.last_pass_finished_at = _now()
 
     # ---- per chat -------------------------------------------------------
 
