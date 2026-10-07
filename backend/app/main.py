@@ -351,6 +351,9 @@ async def get_messages(
     return {"messages": [_message_out(r) for r in rows[:limit]], "has_more": has_more, "has_newer": False}
 
 
+TOTAL_CAP = 1000
+
+
 def _like_escape(q: str) -> str:
     return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -371,18 +374,26 @@ async def search_chat(
     if not q:
         raise HTTPException(422, "empty query")
     pattern = "%" + _like_escape(q) + "%"
-    match = (
-        "(fold_text(m.text) LIKE fold_text($2) ESCAPE '\\' "
-        "OR fold_text(md.file_name) LIKE fold_text($2) ESCAPE '\\')"
-    )
+    # Matching ids from text and file names (a UNION keeps each side index-friendly;
+    # an OR across the join would force a scan). search_text/search_name are folded
+    # copies kept by Postgres; fold_text($2) folds the pattern the same way.
+    matches = """
+        SELECT message_id FROM messages
+        WHERE chat_id = $1 AND search_text LIKE fold_text($2) ESCAPE '\\'
+        UNION
+        SELECT message_id FROM media
+        WHERE chat_id = $1 AND search_name LIKE fold_text($2) ESCAPE '\\'
+    """
     rows = await pool.fetch(
         f"""
+        WITH hits AS ({matches})
         SELECT m.message_id, m.date, left(m.text, 1000) AS text, u.name AS sender_name,
                md.kind AS media_kind, md.file_name
-        FROM messages m
+        FROM hits
+        JOIN messages m ON m.chat_id = $1 AND m.message_id = hits.message_id
         LEFT JOIN media md ON md.chat_id = m.chat_id AND md.message_id = m.message_id
         LEFT JOIN users u ON u.user_id = m.sender_id
-        WHERE m.chat_id = $1 AND {match} AND ($3::bigint IS NULL OR m.message_id < $3)
+        WHERE ($3::bigint IS NULL OR m.message_id < $3)
         ORDER BY m.message_id DESC
         LIMIT $4
         """,
@@ -390,12 +401,9 @@ async def search_chat(
     )
     total = None
     if before is None:
+        # Counting stops at TOTAL_CAP so a very common word stays fast ("1000+").
         total = await pool.fetchval(
-            f"""
-            SELECT count(*) FROM messages m
-            LEFT JOIN media md ON md.chat_id = m.chat_id AND md.message_id = m.message_id
-            WHERE m.chat_id = $1 AND {match}
-            """,
+            f"SELECT count(*) FROM (SELECT 1 FROM ({matches}) h LIMIT {TOTAL_CAP + 1}) c",
             chat_id, pattern,
         )
     return {
@@ -405,7 +413,8 @@ async def search_chat(
             for r in rows[:limit]
         ],
         "has_more": len(rows) > limit,
-        "total": total,
+        "total": min(total, TOTAL_CAP) if total is not None else None,
+        "total_capped": total is not None and total > TOTAL_CAP,
     }
 
 

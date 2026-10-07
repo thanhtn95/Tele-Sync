@@ -44,7 +44,7 @@ export default function ChatSearch({ chatId, onClose, onJump, onQuery }) {
         const r = await api.search(chatId, query, null, PAGE);
         if (my !== reqId.current) return;
         setResults(r.results);
-        setTotal(r.total);
+        setTotal(r.total == null ? null : `${r.total.toLocaleString()}${r.total_capped ? '+' : ''}`);
         setHasMore(r.has_more);
         setIdx(r.results.length ? 0 : -1);
         if (r.results.length) onJump(r.results[0].id);
@@ -102,9 +102,9 @@ export default function ChatSearch({ chatId, onClose, onJump, onQuery }) {
     ? ''
     : busy && total == null
       ? 'Searching…'
-      : total === 0
+      : total === '0'
         ? 'No results'
-        : `${idx + 1} of ${total?.toLocaleString() ?? results.length}`;
+        : `${idx + 1} of ${total ?? results.length}`;
 
   return (
     <>
