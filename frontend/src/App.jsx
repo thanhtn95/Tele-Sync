@@ -36,7 +36,27 @@ export default function App() {
     setAuth((a) => ({ ...a, authenticated: false, username: null }));
   }, []);
 
-  if (error) return <div className="error-bar">{error}</div>;
+  // Server unreachable or restarting (e.g. during an update): retry by itself.
+  useEffect(() => {
+    if (!error) return undefined;
+    const t = setTimeout(() => {
+      setError(null);
+      check();
+    }, 5000);
+    return () => clearTimeout(t);
+  }, [error, check]);
+
+  if (error) {
+    return (
+      <div className="offline">
+        <p>
+          <strong>Can't reach the server</strong>
+        </p>
+        <p className="muted small">{error} — retrying every 5 seconds. It may be restarting after an update.</p>
+        <button onClick={() => (setError(null), check())}>Retry now</button>
+      </div>
+    );
+  }
   if (!auth) return null;
   if (!auth.authenticated) return <Login onLoggedIn={setAuth} />;
 

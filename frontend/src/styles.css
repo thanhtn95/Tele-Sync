@@ -1246,3 +1246,10 @@ mark.hl {
   border-radius: 2px;
   padding: 0 1px;
 }
+
+.offline {
+  max-width: 420px;
+  margin: 20vh auto 0;
+  padding: 0 16px;
+  text-align: center;
+}

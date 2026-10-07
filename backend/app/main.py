@@ -29,7 +29,9 @@ log = logging.getLogger("telesync")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     pool = await db.create_pool(settings.database_url)
-    await db.migrate(pool)
+    applied = await db.migrate(pool)
+    if applied:
+        await db.vacuum_after_migrations(pool)
     client = None
     if settings.tg_api_id and settings.tg_api_hash:
         client = make_client(settings)
@@ -167,7 +169,7 @@ async def _require_tg(request: Request):
 CHAT_COLS = """
   c.chat_id, c.title, c.type, c.sync_enabled, c.sync_media, c.sync_since,
   c.last_msg_id, c.last_synced_at, (c.gphotos_album_id IS NOT NULL) AS has_album,
-  (SELECT count(*) FROM messages m WHERE m.chat_id = c.chat_id) AS message_count  -- PK index range scan
+  c.message_count  -- kept by the sync worker; counting live got slow on big archives
 """
 
 
