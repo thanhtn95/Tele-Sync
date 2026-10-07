@@ -1,6 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api.js';
-import { formatAgo } from '../lib/format.js';
+import { formatAgo, formatTime } from '../lib/format.js';
+import { snippetAround } from '../lib/fold.js';
+import RichText from './RichText.jsx';
+import { MEDIA_LABEL } from './Message.jsx';
 import { Avatar } from './Message.jsx';
 import SyncPanel from './SyncPanel.jsx';
 import ThemeToggle from './ThemeToggle.jsx';
@@ -30,9 +33,75 @@ function Toggle({ checked, onChange, label }) {
   );
 }
 
+const badge = (n) => (n >= 1000 ? '999+' : n.toLocaleString());
+
+/** Messages from every chat matching the search box (accent/case-insensitive). */
+function MessageResults({ query }) {
+  const [res, setRes] = useState({ items: [], total: null, more: false, busy: false });
+  const req = useRef(0);
+  const q = query.trim();
+  useEffect(() => {
+    if (q.length < 2) {
+      setRes({ items: [], total: null, more: false, busy: false });
+      return undefined;
+    }
+    const my = ++req.current;
+    setRes((r) => ({ ...r, busy: true }));
+    const t = setTimeout(async () => {
+      try {
+        const r = await api.searchAll(q);
+        if (my === req.current) {
+          setRes({ items: r.results, total: `${r.total.toLocaleString()}${r.total_capped ? '+' : ''}`, more: r.has_more, busy: false });
+        }
+      } catch {
+        if (my === req.current) setRes({ items: [], total: null, more: false, busy: false });
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [q]);
+  const loadMore = async () => {
+    const last = res.items[res.items.length - 1];
+    const r = await api.searchAll(q, { date: last.date, chat_id: last.chat_id, id: last.id });
+    setRes((cur) => ({ ...cur, items: [...cur.items, ...r.results], more: r.has_more }));
+  };
+  if (q.length < 2) return null;
+  return (
+    <section className="msg-results">
+      <h2 className="muted small">
+        Messages{res.busy ? ' · searching…' : res.total != null ? ` · ${res.total}` : ''}
+      </h2>
+      {!res.busy && res.total === '0' && <div className="muted small">No messages found.</div>}
+      <ul className="chat-rows">
+        {res.items.map((r) => (
+          <li key={`${r.chat_id}:${r.id}`} className="chat-row">
+            <a className="msg-result" href={`#/chat/${r.chat_id}?m=${r.id}`}>
+              <span className="search-row-head">
+                <strong>{r.chat_title}</strong>
+                <span className="muted small">
+                  {new Date(r.date).toLocaleDateString()} {formatTime(r.date)}
+                </span>
+              </span>
+              <span className="search-snippet">
+                <span className="muted">{r.out ? 'You' : r.sender_name || 'Unknown'}: </span>
+                <RichText text={snippetAround(r.text || r.file_name || MEDIA_LABEL[r.media_kind] || '', q)} highlight={q} />
+              </span>
+            </a>
+          </li>
+        ))}
+      </ul>
+      {res.more && (
+        <button className="link-btn search-more" onClick={loadMore}>
+          More results
+        </button>
+      )}
+    </section>
+  );
+}
+
 function ChatRow({ chat, status, onPatch }) {
   const [open, setOpen] = useState(false);
   const count = status?.message_count ?? chat.message_count;
+  const unread = status?.unread_count ?? chat.unread_count ?? 0;
   const lastSynced = status?.last_synced_at ?? chat.last_synced_at;
   const syncing = status?.syncing;
   return (
@@ -58,6 +127,11 @@ function ChatRow({ chat, status, onPatch }) {
             {status?.error && <span className="err"> · {status.error}</span>}
           </span>
         </div>
+        {unread > 0 && (
+          <a className="unread-badge" href={`#/chat/${chat.chat_id}`} title={`${unread} unread`}>
+            {badge(unread)}
+          </a>
+        )}
         <button className="icon-btn" onClick={() => setOpen((o) => !o)} aria-label="Settings" title="Settings">
           ⚙
         </button>
@@ -145,8 +219,23 @@ export default function ChatList({ onLogout, username }) {
   const visible = useMemo(() => {
     if (!chats) return [];
     const q = query.trim().toLowerCase();
-    return chats.filter((c) => (tab === 'all' || c.type === tab) && (!q || (c.title || '').toLowerCase().includes(q)));
-  }, [chats, tab, query]);
+    const unreadOf = (c) => statusById.get(c.chat_id)?.unread_count ?? c.unread_count ?? 0;
+    return chats
+      .filter((c) => (tab === 'all' || c.type === tab) && (!q || (c.title || '').toLowerCase().includes(q)))
+      .map((c, i) => [c, i])
+      // synced chats with new messages first, otherwise keep the server's order
+      .sort(([a, i], [b, j]) => (unreadOf(b) > 0) - (unreadOf(a) > 0) || i - j)
+      .map(([c]) => c);
+  }, [chats, tab, query, statusById]);
+
+  // "(5) Telegram Archive" in the browser tab
+  const totalUnread = useMemo(
+    () => (status?.chats ?? []).reduce((n, c) => n + (c.unread_count || 0), 0),
+    [status],
+  );
+  useEffect(() => {
+    document.title = totalUnread ? `(${badge(totalUnread)}) Telegram Archive` : 'Telegram Archive';
+  }, [totalUnread]);
 
   const enabledCount = chats?.filter((c) => c.sync_enabled).length ?? 0;
 
@@ -172,7 +261,7 @@ export default function ChatList({ onLogout, username }) {
       <div className="filters">
         <input
           type="search"
-          placeholder="Search chats"
+          placeholder="Search chats and messages"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           className="search"
@@ -188,11 +277,13 @@ export default function ChatList({ onLogout, username }) {
           {chats ? `${visible.length} shown · ${enabledCount} syncing` : 'Loading chats…'}
         </div>
       </div>
+      {query.trim().length >= 2 && visible.length > 0 && <h2 className="muted small">Chats</h2>}
       <ul className="chat-rows">
         {visible.map((c) => (
           <ChatRow key={c.chat_id} chat={c} status={statusById.get(c.chat_id)} onPatch={patch} />
         ))}
       </ul>
+      <MessageResults query={query} />
     </div>
   );
 }

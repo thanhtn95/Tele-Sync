@@ -56,7 +56,7 @@ const TABS = [
  * opening shows the newest page; jumping to an old reply/pin loads a window around it.
  * Scrolling up loads older pages, scrolling down loads newer ones until the latest.
  */
-export default function ChatView({ chatId, tab = 'chat' }) {
+export default function ChatView({ chatId, tab = 'chat', openAt = null }) {
   const [chat, setChat] = useState(null);
   const [messages, setMessages] = useState([]); // ascending by id
   const [hasMore, setHasMore] = useState(true); // older messages exist
@@ -73,6 +73,10 @@ export default function ChatView({ chatId, tab = 'chat' }) {
   const [counts, setCounts] = useState(null);
   const [viewer, setViewer] = useState(null);
   const [replyTo, setReplyTo] = useState(null);
+  const openAtRef = useRef(openAt);
+  openAtRef.current = openAt;
+  const openedAt = useRef(null);
+  const jumpToRef = useRef(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
   const virtuoso = useRef(null);
@@ -139,11 +143,21 @@ export default function ChatView({ chatId, tab = 'chat' }) {
     api.chat(chatId).then((c) => alive && setChat(c), (e) => alive && setError(e.message));
     api.pinned(chatId).then((p) => alive && setPins(p), () => {});
     api.chatMedia(chatId, { limit: 1 }).then((r) => alive && setCounts(r.counts), () => {});
-    openWindow(null);
+    // From a search-all result (#/chat/<id>?m=<msg>): open at that message.
+    openedAt.current = openAtRef.current;
+    openWindow(openAtRef.current);
     return () => {
       alive = false;
     };
   }, [chatId, openWindow]);
+
+  // Another result in the same chat: jump without reloading the chat.
+  useEffect(() => {
+    if (openAt != null && openAt !== openedAt.current) {
+      openedAt.current = openAt;
+      jumpToRef.current?.(openAt);
+    }
+  }, [openAt]);
 
   // Prepend older messages, keeping the scroll position: firstItemIndex shifts by the
   // number of rows added (albums split across pages may merge, so diff the row counts).
@@ -231,6 +245,16 @@ export default function ChatView({ chatId, tab = 'chat' }) {
     },
     [openWindow],
   );
+
+  jumpToRef.current = jumpTo;
+
+  // Viewing the latest messages marks the chat read (clears its unread badge).
+  const lastId = messages.length ? messages[messages.length - 1].id : null;
+  useEffect(() => {
+    if (tab !== 'chat' || hasNewer || !atBottom || lastId == null) return undefined;
+    const t = setTimeout(() => document.visibilityState === 'visible' && api.markRead(chatId).catch(() => {}), 1000);
+    return () => clearTimeout(t);
+  }, [chatId, tab, hasNewer, atBottom, lastId]);
 
   useEffect(() => {
     const id = pendingJump.current;
@@ -374,6 +398,7 @@ export default function ChatView({ chatId, tab = 'chat' }) {
             startReached={loadOlder}
             endReached={loadNewer}
             atBottomStateChange={setAtBottom}
+            atBottomThreshold={24}
             followOutput={(bottom) => (bottom ? 'smooth' : false)}
             rangeChanged={onRangeChanged}
             itemContent={itemContent}
