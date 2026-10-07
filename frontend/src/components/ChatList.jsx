@@ -98,12 +98,22 @@ function MessageResults({ query }) {
   );
 }
 
-function ChatRow({ chat, status, onPatch }) {
+function ChatRow({ chat, status, onPatch, onSyncNow }) {
   const [open, setOpen] = useState(false);
+  const [asking, setAsking] = useState(false);
   const count = status?.message_count ?? chat.message_count;
   const unread = status?.unread_count ?? chat.unread_count ?? 0;
   const lastSynced = status?.last_synced_at ?? chat.last_synced_at;
   const syncing = status?.syncing;
+  const queued = status?.queued;
+  const syncNow = async () => {
+    setAsking(true);
+    try {
+      await onSyncNow(chat.chat_id);
+    } finally {
+      setAsking(false);
+    }
+  };
   // The whole row opens the chat; its own controls (badge, ⚙, toggle) keep their clicks.
   const openChat = (e) => {
     if (count > 0 && !e.target.closest('a, button, input, label')) window.location.hash = `#/chat/${chat.chat_id}`;
@@ -125,7 +135,7 @@ function ChatRow({ chat, status, onPatch }) {
             {(chat.sync_enabled || count > 0) && (
               <>
                 {' · '}
-                {count.toLocaleString()} msgs · {syncing ? 'syncing…' : `synced ${formatAgo(lastSynced)}`}
+                {count.toLocaleString()} msgs · {syncing ? 'syncing…' : queued ? 'queued…' : `synced ${formatAgo(lastSynced)}`}
               </>
             )}
             {status?.error && <span className="err"> · {status.error}</span>}
@@ -135,6 +145,17 @@ function ChatRow({ chat, status, onPatch }) {
           <a className="unread-badge" href={`#/chat/${chat.chat_id}`} title={`${unread} unread`}>
             {badge(unread)}
           </a>
+        )}
+        {chat.sync_enabled && (
+          <button
+            className={`icon-btn${syncing || queued ? ' spin' : ''}`}
+            onClick={syncNow}
+            disabled={asking || syncing || queued}
+            aria-label="Sync this chat now"
+            title={syncing ? 'Syncing…' : queued ? 'Queued' : 'Sync this chat now'}
+          >
+            ↻
+          </button>
         )}
         <button className="icon-btn" onClick={() => setOpen((o) => !o)} aria-label="Settings" title="Settings">
           ⚙
@@ -178,6 +199,7 @@ export default function ChatList({ onLogout, username }) {
   const [error, setError] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [status, setStatus] = useState(null);
+  const [statusKey, setStatusKey] = useState(0);
 
   const load = useCallback(async (refresh) => {
     setError(null);
@@ -214,9 +236,20 @@ export default function ChatList({ onLogout, username }) {
     }
   }, []);
 
+  const syncNow = useCallback(async (id) => {
+    try {
+      await api.syncChat(id);
+      setStatusKey((k) => k + 1); // SyncPanel re-polls and shows "queued" / "syncing"
+    } catch (e) {
+      setError(`Sync failed to start: ${e.message}`);
+    }
+  }, []);
+
   const statusById = useMemo(() => {
     const m = new Map();
-    for (const c of status?.chats ?? []) m.set(c.chat_id, { ...c, syncing: status.current_chat_id === c.chat_id });
+    const queued = new Set(status?.queued_chat_ids ?? []);
+    for (const c of status?.chats ?? [])
+      m.set(c.chat_id, { ...c, syncing: status.current_chat_id === c.chat_id, queued: queued.has(c.chat_id) });
     return m;
   }, [status]);
 
@@ -260,7 +293,7 @@ export default function ChatList({ onLogout, username }) {
           )}
         </div>
       </header>
-      <SyncPanel onStatus={setStatus} />
+      <SyncPanel onStatus={setStatus} refreshKey={statusKey} />
       {error && <div className="error-bar">{error}</div>}
       <div className="filters">
         <input
@@ -284,7 +317,7 @@ export default function ChatList({ onLogout, username }) {
       {query.trim().length >= 2 && visible.length > 0 && <h2 className="muted small">Chats</h2>}
       <ul className="chat-rows">
         {visible.map((c) => (
-          <ChatRow key={c.chat_id} chat={c} status={statusById.get(c.chat_id)} onPatch={patch} />
+          <ChatRow key={c.chat_id} chat={c} status={statusById.get(c.chat_id)} onPatch={patch} onSyncNow={syncNow} />
         ))}
       </ul>
       <MessageResults query={query} />

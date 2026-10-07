@@ -259,6 +259,17 @@ button:disabled {
   font-size: 18px;
   padding: 4px;
 }
+.icon-btn.spin {
+  animation: spin 1.2s linear infinite;
+}
+.icon-btn:disabled {
+  cursor: default;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 .link-btn {
   border: none;
   background: none;

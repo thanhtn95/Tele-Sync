@@ -273,7 +273,7 @@ async def patch_chat(chat_id: int, body: ChatPatch, request: Request, pool=Depen
         if res.endswith(" 0"):
             raise HTTPException(404, "chat not found")
         if fields.get("sync_enabled"):
-            request.app.state.worker.trigger()  # start syncing the newly enabled chat now
+            request.app.state.worker.request_chat(chat_id)  # start syncing the newly enabled chat now
     return await get_chat(chat_id, pool)
 
 
@@ -723,6 +723,7 @@ async def sync_status(request: Request, pool=Depends(pool_dep)):
         "current_chat_id": st.current_chat_id,
         "current_chat_title": st.current_chat_title,
         "progress": st.progress,
+        "queued_chat_ids": worker.queued_chat_ids,
         "last_pass_started_at": st.last_pass_started_at,
         "last_pass_finished_at": st.last_pass_finished_at,
         "next_pass_at": st.next_pass_at,
@@ -736,6 +737,18 @@ async def sync_status(request: Request, pool=Depends(pool_dep)):
         "disk": disk_stats(),
         "disk_low": st.disk_low,
     }
+
+
+@app.post("/api/chats/{chat_id}/sync", status_code=202)
+async def sync_one(chat_id: int, request: Request, pool=Depends(pool_dep)):
+    enabled = await pool.fetchval("SELECT sync_enabled FROM chats WHERE chat_id = $1", chat_id)
+    if enabled is None:
+        raise HTTPException(404, "unknown chat")
+    if not enabled:
+        raise HTTPException(409, "sync is off for this chat")
+    worker: SyncWorker = request.app.state.worker
+    worker.request_chat(chat_id)
+    return {"queued": True, "running": worker.state.running}
 
 
 @app.post("/api/sync/run", status_code=202)
