@@ -9,6 +9,7 @@ import MediaViewer from './MediaViewer.jsx';
 import MessageBubble from './Message.jsx';
 import PinnedBar from './PinnedBar.jsx';
 import ThemeToggle from './ThemeToggle.jsx';
+import PrivacyToggle from './PrivacyToggle.jsx';
 
 const PAGE = 50;
 const START_INDEX = 10_000_000; // Virtuoso firstItemIndex must stay positive while prepending
@@ -340,6 +341,7 @@ export default function ChatView({ chatId, tab = 'chat' }) {
               🔍
             </button>
           )}
+          <PrivacyToggle />
           <ThemeToggle />
         </header>
       )}

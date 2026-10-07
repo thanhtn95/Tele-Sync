@@ -51,6 +51,9 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
   New and edited messages of synced chats are saved live from Telegram (not only every
   30 min) and the open chat picks them up within a few seconds. Media in live messages is
   fetched by the next sync.
+* **Hide media** (👁/🙈 in the header, remembered per browser) for using the app in
+  public: photos, videos, GIFs, stickers, albums, profile pictures and pinned thumbnails
+  are replaced by small labels and aren't even downloaded; tap a label to show one item.
 * **Search in a chat** (🔍 in the header, like Telegram): ignores case and accents
   ("tieng viet" finds "Tiếng Việt"), also matches file names; ▲/▼ or Enter step through
   matches and jump to each, matches are highlighted, ☰ shows all results as a list.

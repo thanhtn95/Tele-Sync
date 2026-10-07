@@ -4,6 +4,7 @@ import { api, fileUrl } from '../lib/api.js';
 import { formatDuration, formatSize, formatTime } from '../lib/format.js';
 import { thumbUrl } from '../lib/thumb.js';
 import { useBaseUrl } from './Media.jsx';
+import { useHideMedia } from '../lib/privacy.js';
 
 const PAGE = 90;
 
@@ -42,7 +43,21 @@ function useItems(chatId, group) {
   return { items, hasMore, loading, loadMore: () => load(false) };
 }
 
-function Tile({ item, onOpen }) {
+function Tile(props) {
+  const hidden = useHideMedia();
+  const [shown, setShown] = useState(false);
+  if (hidden && !shown) {
+    const m = props.item.media;
+    return (
+      <button className="tile tile-hidden" onClick={() => setShown(true)} title="Tap to show">
+        <span>{m.kind === 'photo' ? '🖼' : '🎬'}</span>
+      </button>
+    );
+  }
+  return <VisibleTile {...props} />;
+}
+
+function VisibleTile({ item, onOpen }) {
   const m = item.media;
   const { url } = useBaseUrl(m.file_path ? null : m.gphotos_media_id);
   const [ok, setOk] = useState(false);
