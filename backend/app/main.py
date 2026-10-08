@@ -660,14 +660,15 @@ async def gphotos_urls(body: UrlsRequest, request: Request):
 
 # ---- sync -----------------------------------------------------------------
 
-_media_stats_cache: dict = {"at": 0.0, "value": None}
+_media_stats_cache: dict = {"at": 0.0, "value": None, "epoch": 0}
 MEDIA_STATS_TTL = 60  # the status box polls every few seconds; counting can wait a minute
 
 
-async def media_stats(pool) -> dict:
+async def media_stats(pool, epoch: int = 0) -> dict:
     """Where media files are: Google Photos, VM disk, failed, or not downloaded (yet)."""
     now = time.monotonic()
-    if _media_stats_cache["value"] is not None and now - _media_stats_cache["at"] < MEDIA_STATS_TTL:
+    c = _media_stats_cache
+    if c["value"] is not None and c.get("epoch") == epoch and now - c["at"] < MEDIA_STATS_TTL:
         return _media_stats_cache["value"]
     counts = await pool.fetchrow(
         """
@@ -690,8 +691,17 @@ async def media_stats(pool) -> dict:
         GROUP BY 1 ORDER BY 2 DESC LIMIT 3
         """
     )
-    value = {**dict(counts), "top_errors": [dict(r) for r in reasons]}
-    _media_stats_cache.update(at=now, value=value)
+    by_chat = await pool.fetch(
+        """
+        SELECT m.chat_id, c.title, count(*) AS n
+        FROM media m JOIN chats c USING (chat_id)
+        WHERE m.gphotos_media_id IS NULL AND m.file_path IS NULL
+          AND m.error IS NOT NULL AND m.error NOT LIKE 'skipped:%'
+        GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 5
+        """
+    )
+    value = {**dict(counts), "top_errors": [dict(r) for r in reasons], "failed_by_chat": [dict(r) for r in by_chat]}
+    _media_stats_cache.update(at=now, value=value, epoch=epoch)
     return value
 
 
@@ -733,9 +743,10 @@ async def sync_status(request: Request, pool=Depends(pool_dep)):
         "telegram_authorised": authorised,
         "gphotos_enabled": request.app.state.gphotos is not None,
         "chats": [{**_chat_out(r), "error": st.chat_errors.get(r["chat_id"])} for r in rows],
-        "media": await media_stats(pool),
+        "media": await media_stats(pool, st.media_epoch),
         "disk": disk_stats(),
         "disk_low": st.disk_low,
+        "retrying_failed": st.retrying_failed,
     }
 
 
@@ -748,6 +759,13 @@ async def sync_one(chat_id: int, request: Request, pool=Depends(pool_dep)):
         raise HTTPException(409, "sync is off for this chat")
     worker: SyncWorker = request.app.state.worker
     worker.request_chat(chat_id)
+    return {"queued": True, "running": worker.state.running}
+
+
+@app.post("/api/media/retry-failed", status_code=202)
+async def retry_failed(request: Request):
+    worker: SyncWorker = request.app.state.worker
+    worker.request_failed_retry()
     return {"queued": True, "running": worker.state.running}
 
 
