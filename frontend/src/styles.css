@@ -1483,3 +1483,141 @@ mark.hl {
 .msg-result:hover {
   background: var(--hover);
 }
+
+/* ---------- website archive ---------- */
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 12px;
+  text-decoration: none;
+}
+.archive-page .top h1 .back {
+  font-size: 26px;
+}
+.archive-url input,
+.archive-page input[type='search'],
+.archive-page input[type='number'] {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  min-width: 0;
+}
+.archive-page input[type='number'] {
+  width: 84px;
+  padding: 4px 8px;
+}
+.archive-url {
+  display: flex;
+  gap: 8px;
+}
+.archive-url input {
+  flex: 1;
+}
+.archive-pick {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+.archive-pick-head {
+  display: grid;
+  gap: 2px;
+  overflow-wrap: anywhere;
+  margin-bottom: 4px;
+}
+.archive-pick-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+.archive-pick-tools input {
+  flex: 1;
+  min-width: 160px;
+}
+.archive-cats,
+.archive-jobs,
+.archive-pages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.archive-cats {
+  max-height: 50vh;
+  overflow-y: auto;
+  display: grid;
+  gap: 2px;
+}
+.archive-cats label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 6px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.archive-cats label:hover {
+  background: var(--hover);
+}
+.archive-cat-label {
+  font-weight: 500;
+}
+.archive-cat-path {
+  margin-left: auto;
+  overflow-wrap: anywhere;
+}
+.archive-tag {
+  font-size: 11px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 0 5px;
+}
+.archive-go {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.archive-h {
+  margin: 20px 0 6px;
+  font-weight: 500;
+}
+.archive-job {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+.archive-job-main {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  color: var(--text);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.archive-pages li {
+  display: grid;
+  gap: 1px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}

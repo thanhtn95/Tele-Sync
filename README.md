@@ -74,10 +74,18 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
   bottom of a chat show as a count on the chat (synced chats only, 999+ max); those chats
   sort first and the browser tab shows the total, e.g. "(5) Telegram Archive". History
   imported by a sync pass doesn't count as unread.
-* **Archive a web page**: `POST /api/archive {url}` downloads the page (redirects
-  followed, max 20 MB) into `MEDIA_DIR/web/` and records it in `web_archives`; open it at
-  `/files/<file_path>`. HTML gets a `<base>` tag so its images/CSS still load from the live
-  site. Only public http(s) hosts are allowed (no localhost / private / tailnet addresses).
+* **Website archive** (🗄 *Websites* on the chat list, `#/archive`): enter a site's address,
+  *Find categories* lists its sections (menu links first, e.g. `/news/`, `/category/sport/`),
+  tick the ones you want and set a page limit. A background job then saves the home page
+  and the pages of those categories to `MEDIA_DIR/web/job<id>/`: listing pages (sub-sections,
+  page 2…) are followed, and the articles they list are saved even when they live elsewhere
+  on the site (`/story-123.html`). Articles come before more listing pages and categories take
+  turns, so a small limit still covers each one. One page per second, robots.txt respected, one
+  job at a time, stops when the disk is almost full. When the job ends, links between saved
+  pages point to the copies and everything else to the live site; scripts are removed
+  (they couldn't run under the `/files/` sandbox anyway) and lazy images are made to load. Only
+  public http(s) hosts are fetched (no localhost / private / tailnet addresses, redirects
+  included). A job interrupted by a restart is marked so and isn't resumed.
 * **Theme**: the button in the header switches System → Light → Dark (Telegram's
   night colours); the choice is remembered per browser, and "System" follows the OS live.
 * **Pinned messages** mirror Telegram: every pass re-reads the chat's pinned list, so
@@ -107,7 +115,10 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
 | POST | `/api/sync/run` | trigger a pass now |
 | POST | `/api/chats/{chat_id}/sync` | sync one chat now (409 if its sync is off) |
 | POST | `/api/media/retry-failed` | retry failed media in every chat |
-| POST / GET | `/api/archive` `{url}` / `?limit=50` | save a snapshot of a web page / list snapshots, newest first |
+| POST | `/api/archive/discover` `{url}` | a site's categories `[{prefix, label, url, links, in_nav}]` |
+| POST / GET | `/api/archive/jobs` `{url, categories, max_pages}` | start archiving picked categories / list jobs |
+| GET / DELETE | `/api/archive/jobs/{id}` | a job with its pages / delete it and its files |
+| POST | `/api/archive/jobs/{id}/cancel` | stop a running job |
 
 Chat ids are Telethon "marked" ids (`-100…` for channels/supergroups). `grouped_id` is
 returned as a string because it does not fit in a JS number.

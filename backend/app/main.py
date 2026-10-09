@@ -19,7 +19,7 @@ from telethon import events, utils
 from telethon.errors import FloodWaitError, RPCError
 
 from . import auth, db
-from .archive import ArchiveError, archive_website
+from .archive import JOB_COLS, MAX_PAGES_LIMIT, ArchiveError, WebArchiver
 from .config import settings
 from .gphotos import GPhotos
 from .service import service_text
@@ -62,9 +62,12 @@ async def lifespan(app: FastAPI):
         _register_live_updates(client, worker)
     app.state.pool, app.state.client, app.state.gphotos, app.state.worker = pool, client, gphotos, worker
     app.state.dialogs_lock = asyncio.Lock()
+    app.state.archiver = WebArchiver(pool, settings.media_dir)
+    await app.state.archiver.mark_interrupted()
     try:
         yield
     finally:
+        await app.state.archiver.aclose()
         task.cancel()
         try:
             await task
@@ -659,37 +662,75 @@ async def gphotos_urls(body: UrlsRequest, request: Request):
     return {"urls": await gp.base_urls(body.media_ids, force=body.force)}
 
 
-# ---- web archive ------------------------------------------------------------
+# ---- website archive ------------------------------------------------------------
 
-class ArchiveRequest(BaseModel):
+class DiscoverRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2000)
 
 
-ARCHIVE_COLS = "id, url, final_url, status, content_type, title, size, file_path, archived_at"
+class ArchiveCategory(BaseModel):
+    prefix: str = Field(min_length=1, max_length=500)
+    label: str | None = Field(None, max_length=200)
+    url: str | None = Field(None, max_length=2000)
 
 
-@app.post("/api/archive", status_code=201)
-async def archive_url(body: ArchiveRequest, pool=Depends(pool_dep)):
-    """Save a snapshot of a web page; open it at /files/<file_path>."""
+class ArchiveJobRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2000)
+    categories: list[ArchiveCategory] = Field(min_length=1, max_length=200)
+    max_pages: int = Field(100, ge=1, le=MAX_PAGES_LIMIT)
+
+
+@app.post("/api/archive/discover")
+async def archive_discover(body: DiscoverRequest, request: Request):
+    """Read the site's home page and list its categories (sections) to pick from."""
     try:
-        a = await archive_website(body.url, settings.media_dir)
+        return await request.app.state.archiver.discover(body.url)
     except ArchiveError as e:
         raise HTTPException(400, str(e))
-    row = await pool.fetchrow(
-        f"""
-        INSERT INTO web_archives (url, final_url, status, content_type, title, size, file_path, archived_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING {ARCHIVE_COLS}
-        """,
-        a.url, a.final_url, a.status, a.content_type, a.title, a.size, a.rel_path, a.archived_at,
-    )
-    return dict(row)
 
 
-@app.get("/api/archive")
-async def list_archives(limit: int = Query(50, ge=1, le=500), pool=Depends(pool_dep)):
-    """Saved snapshots, newest first."""
-    rows = await pool.fetch(f"SELECT {ARCHIVE_COLS} FROM web_archives ORDER BY archived_at DESC LIMIT $1", limit)
+@app.post("/api/archive/jobs", status_code=202)
+async def archive_start(body: ArchiveJobRequest, request: Request):
+    """Archive the home page plus every page found in the picked categories (in the background)."""
+    try:
+        return await request.app.state.archiver.start(
+            body.url, [c.model_dump() for c in body.categories], body.max_pages
+        )
+    except ArchiveError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/archive/jobs")
+async def archive_jobs(pool=Depends(pool_dep)):
+    rows = await pool.fetch(f"SELECT {JOB_COLS} FROM web_archive_jobs ORDER BY id DESC LIMIT 200")
     return [dict(r) for r in rows]
+
+
+@app.get("/api/archive/jobs/{job_id}")
+async def archive_job(job_id: int, pool=Depends(pool_dep)):
+    """A job and its pages (saved and failed), in the order they were fetched."""
+    job = await pool.fetchrow(f"SELECT {JOB_COLS} FROM web_archive_jobs WHERE id = $1", job_id)
+    if job is None:
+        raise HTTPException(404, "archive not found")
+    pages = await pool.fetch(
+        "SELECT id, url, final_url, category, status, content_type, title, size, file_path, error, archived_at "
+        "FROM web_archive_pages WHERE job_id = $1 ORDER BY id",
+        job_id,
+    )
+    return {**dict(job), "pages": [dict(p) for p in pages]}
+
+
+@app.post("/api/archive/jobs/{job_id}/cancel")
+async def archive_cancel(job_id: int, request: Request):
+    return {"cancelled": await request.app.state.archiver.cancel(job_id)}
+
+
+@app.delete("/api/archive/jobs/{job_id}")
+async def archive_delete(job_id: int, request: Request):
+    """Delete a job, its page records and its saved files."""
+    if not await request.app.state.archiver.delete(job_id):
+        raise HTTPException(404, "archive not found")
+    return {"deleted": True}
 
 
 # ---- sync -----------------------------------------------------------------

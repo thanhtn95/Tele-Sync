@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import ChatList from './components/ChatList.jsx';
 import ChatView from './components/ChatView.jsx';
+import WebArchive from './components/WebArchive.jsx';
 import Login from './components/Login.jsx';
 import { api } from './lib/api.js';
 
-// Tiny hash router: #/ (chat list), #/chat/<id> (viewer), #/chat/<id>/media|files|voice (tabs).
+// Tiny hash router: #/ (chat list), #/chat/<id> (viewer), #/chat/<id>/media|files|voice (tabs),
+// #/archive (website archives), #/archive/<job id>.
 function useHash() {
   const [hash, setHash] = useState(window.location.hash);
   useEffect(() => {
@@ -60,6 +62,8 @@ export default function App() {
   if (!auth) return null;
   if (!auth.authenticated) return <Login onLoggedIn={setAuth} />;
 
+  const a = hash.match(/^#\/archive(?:\/(\d+))?/);
+  if (a) return <WebArchive jobId={a[1] ? Number(a[1]) : null} />;
   const m = hash.match(/^#\/chat\/(-?\d+)(?:\/(media|files|voice))?(?:\?m=(\d+))?/);
   return m ? (
     <ChatView chatId={Number(m[1])} tab={m[2] || 'chat'} openAt={m[3] ? Number(m[3]) : null} />

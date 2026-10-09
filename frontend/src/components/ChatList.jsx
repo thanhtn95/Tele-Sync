@@ -283,6 +283,9 @@ export default function ChatList({ onLogout, username }) {
         <div className="top-actions">
           <PrivacyToggle />
           <ThemeToggle />
+          <a className="button-link" href="#/archive" title="Save websites, by category">
+            🗄 Websites
+          </a>
           <button onClick={() => load(true)} disabled={refreshing} title="Re-read chat list from Telegram (slow)">
             {refreshing ? 'Refreshing…' : '↻ Refresh chats'}
           </button>
