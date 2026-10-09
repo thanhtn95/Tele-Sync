@@ -60,6 +60,13 @@ export const api = {
   syncRun: () => request('POST', '/api/sync/run'),
   syncChat: (id) => request('POST', `/api/chats/${id}/sync`),
   retryFailed: () => request('POST', '/api/media/retry-failed'),
+  archiveDiscover: (url) => request('POST', '/api/archive/discover', { url }),
+  archiveStart: (url, categories, maxPages) =>
+    request('POST', '/api/archive/jobs', { url, categories, max_pages: maxPages }),
+  archiveJobs: () => request('GET', '/api/archive/jobs'),
+  archiveJob: (id) => request('GET', `/api/archive/jobs/${id}`),
+  archiveCancel: (id) => request('POST', `/api/archive/jobs/${id}/cancel`),
+  archiveDelete: (id) => request('DELETE', `/api/archive/jobs/${id}`),
 };
 
 /** URL for a file stored on the VM disk (served by nginx). */
