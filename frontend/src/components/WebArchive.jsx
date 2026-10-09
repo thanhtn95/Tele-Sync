@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, fileUrl } from '../lib/api.js';
-import { formatAgo } from '../lib/format.js';
+import { formatAgo, formatSize } from '../lib/format.js';
 
 const ACTIVE = new Set(['queued', 'running']);
 const STATUS = {
@@ -32,13 +32,79 @@ function usePoll(load, active) {
   }, [load, active]);
 }
 
-/** Step 1: enter a site; step 2: tick its categories; then start a job. */
+/** Indexes of the items under item i in a menu (the following items that sit deeper). */
+function descendants(items, i) {
+  const out = [];
+  for (let j = i + 1; j < items.length && items[j].depth > items[i].depth; j++) out.push(j);
+  return out;
+}
+
+/** One of the site's menus, drawn as it is nested on the site; ticking an item ticks its sub-items. */
+function MenuTree({ menu, picked, setPicked, filter }) {
+  const f = filter.trim().toLowerCase();
+  const items = menu.items;
+  const toggle = (i) =>
+    setPicked((p) => {
+      const n = new Set(p);
+      const on = !n.has(items[i].url);
+      [i, ...descendants(items, i)].forEach((j) => (on ? n.add(items[j].url) : n.delete(items[j].url)));
+      return n;
+    });
+  const setAll = (on) =>
+    setPicked((p) => {
+      const n = new Set(p);
+      items.forEach((it) => (on ? n.add(it.url) : n.delete(it.url)));
+      return n;
+    });
+  const shown = items
+    .map((it, i) => ({ it, i }))
+    .filter(({ it }) => !f || it.label.toLowerCase().includes(f) || it.prefix.toLowerCase().includes(f));
+  if (shown.length === 0) return null;
+  return (
+    <section className="archive-menu">
+      <div className="archive-menu-head">
+        <strong className="small">{menu.name}</strong>
+        <span className="muted small">{items.length}</span>
+        <button className="link-btn small" onClick={() => setAll(true)}>
+          All
+        </button>
+        <button className="link-btn small" onClick={() => setAll(false)}>
+          None
+        </button>
+      </div>
+      <ul className="archive-cats">
+        {shown.map(({ it, i }) => {
+          const subs = descendants(items, i);
+          const some = subs.some((j) => picked.has(items[j].url));
+          return (
+            <li key={it.url} style={{ paddingLeft: `${(f ? 0 : it.depth) * 22}px` }}>
+              <label className={it.depth === 0 ? 'archive-top' : undefined}>
+                <input
+                  type="checkbox"
+                  checked={picked.has(it.url)}
+                  ref={(el) => el && (el.indeterminate = !picked.has(it.url) && some)}
+                  onChange={() => toggle(i)}
+                />
+                <span className="archive-cat-label">{it.label}</span>
+                {subs.length > 0 && <span className="muted small">+{subs.length}</span>}
+                <span className="muted small archive-cat-path">{it.prefix}</span>
+              </label>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+/** Step 1: enter a site; step 2: tick items of its navbar; then start a job. */
 function NewArchive({ onStarted }) {
   const [url, setUrl] = useState('');
-  const [site, setSite] = useState(null); // {url, title, categories}
-  const [picked, setPicked] = useState(new Set());
+  const [site, setSite] = useState(null); // {url, title, menus: [{name, items: [{label, url, prefix, depth}]}]}
+  const [picked, setPicked] = useState(new Set()); // item urls
   const [filter, setFilter] = useState('');
   const [maxPages, setMaxPages] = useState(100);
+  const [images, setImages] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
 
@@ -60,35 +126,17 @@ function NewArchive({ onStarted }) {
     }
   };
 
-  const shown = useMemo(() => {
-    if (!site) return [];
-    const f = filter.trim().toLowerCase();
-    return f
-      ? site.categories.filter((c) => c.label.toLowerCase().includes(f) || c.prefix.toLowerCase().includes(f))
-      : site.categories;
-  }, [site, filter]);
-
-  const toggle = (prefix) =>
-    setPicked((p) => {
-      const n = new Set(p);
-      n.has(prefix) ? n.delete(prefix) : n.add(prefix);
-      return n;
-    });
-  const setAll = (on) =>
-    setPicked((p) => {
-      const n = new Set(p);
-      shown.forEach((c) => (on ? n.add(c.prefix) : n.delete(c.prefix)));
-      return n;
-    });
+  const allItems = useMemo(() => (site ? site.menus.flatMap((m) => m.items) : []), [site]);
 
   const start = async () => {
     setBusy(true);
     setError(null);
     try {
-      const cats = site.categories
-        .filter((c) => picked.has(c.prefix))
+      const seen = new Set();
+      const cats = allItems
+        .filter((it) => picked.has(it.url) && !seen.has(it.url) && seen.add(it.url))
         .map(({ prefix, label, url: u }) => ({ prefix, label, url: u }));
-      const job = await api.archiveStart(site.url, cats, Number(maxPages) || 100);
+      const job = await api.archiveStart(site.url, cats, Number(maxPages) || 100, images);
       setSite(null);
       setUrl('');
       onStarted(job);
@@ -114,7 +162,7 @@ function NewArchive({ onStarted }) {
           aria-label="Website address"
         />
         <button className="primary" disabled={busy || !url.trim()}>
-          {busy && !site ? 'Reading…' : 'Find categories'}
+          {busy && !site ? 'Reading…' : 'Read menu'}
         </button>
       </form>
       {error && <div className="err small">{error}</div>}
@@ -125,42 +173,31 @@ function NewArchive({ onStarted }) {
             <strong>{site.title || host(site.url)}</strong>
             <span className="muted small">{site.url}</span>
           </div>
-          {site.categories.length === 0 ? (
-            <p className="muted small">No categories found on this page. Try the address of a section instead.</p>
+          {site.menus.length === 0 ? (
+            <p className="muted small">No menu found on this page. Try the address of a section instead.</p>
           ) : (
             <>
-              <div className="archive-pick-tools">
-                {site.categories.length > 8 && (
-                  <input
-                    type="search"
-                    placeholder="Filter categories"
-                    value={filter}
-                    onChange={(e) => setFilter(e.target.value)}
-                  />
-                )}
-                <button className="link-btn" onClick={() => setAll(true)}>
-                  Select all
-                </button>
-                <button className="link-btn" onClick={() => setAll(false)}>
-                  None
-                </button>
-              </div>
-              <ul className="archive-cats">
-                {shown.map((c) => (
-                  <li key={c.prefix}>
-                    <label>
-                      <input type="checkbox" checked={picked.has(c.prefix)} onChange={() => toggle(c.prefix)} />
-                      <span className="archive-cat-label">{c.label}</span>
-                      {c.in_nav && <span className="archive-tag">menu</span>}
-                      <span className="muted small archive-cat-path">
-                        {c.prefix} · {c.links} link{c.links === 1 ? '' : 's'}
-                      </span>
-                    </label>
-                  </li>
+              <p className="muted small">Tick what to archive from the site's menu (an item includes its sub-items).</p>
+              {allItems.length > 12 && (
+                <input
+                  type="search"
+                  className="archive-filter"
+                  placeholder="Filter menu items"
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value)}
+                />
+              )}
+              <div className="archive-menus">
+                {site.menus.map((m, i) => (
+                  <MenuTree key={i} menu={m} picked={picked} setPicked={setPicked} filter={filter} />
                 ))}
-              </ul>
+              </div>
             </>
           )}
+          <label className="small archive-check">
+            <input type="checkbox" checked={images} onChange={(e) => setImages(e.target.checked)} /> Save images too
+            <span className="muted"> (styles and fonts are always saved)</span>
+          </label>
           <div className="archive-go">
             <label className="small">
               Up to{' '}
@@ -175,12 +212,12 @@ function NewArchive({ onStarted }) {
               pages
             </label>
             <button className="primary" disabled={busy || picked.size === 0} onClick={start}>
-              Archive {picked.size} categor{picked.size === 1 ? 'y' : 'ies'}
+              Archive {picked.size} item{picked.size === 1 ? '' : 's'}
             </button>
           </div>
           <p className="muted small">
-            Saves the home page and every page linked inside the picked categories, one page per second, skipping
-            what the site's robots.txt disallows.
+            Saves the home page and the pages of each picked item, with their look (CSS, fonts
+            {images ? ', images' : ''}), one page per second, skipping what the site's robots.txt disallows.
           </p>
         </div>
       )}
@@ -208,6 +245,7 @@ function JobRow({ job, onChanged }) {
         </span>
         <span className={`small ${job.status === 'failed' ? 'err' : 'muted'}`}>
           {STATUS[job.status] || job.status} · {job.pages_saved} saved
+          {job.pages_bytes + job.assets_bytes > 0 ? ` · ${formatSize(job.pages_bytes + job.assets_bytes)}` : ''}
           {job.pages_failed ? ` · ${job.pages_failed} failed` : ''} · {formatAgo(job.created_at)}
           {job.error ? ` · ${job.error}` : ''}
         </span>
@@ -274,6 +312,7 @@ function JobDetail({ jobId }) {
         </a>
         <span className={`small ${job.status === 'failed' ? 'err' : 'muted'}`}>
           {STATUS[job.status] || job.status} · {job.pages_saved} saved
+          {job.pages_bytes + job.assets_bytes > 0 ? ` · ${formatSize(job.pages_bytes + job.assets_bytes)}` : ''}
           {job.pages_failed ? ` · ${job.pages_failed} failed` : ''} · up to {job.max_pages} pages
           {job.error ? ` · ${job.error}` : ''}
         </span>

@@ -74,18 +74,24 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
   bottom of a chat show as a count on the chat (synced chats only, 999+ max); those chats
   sort first and the browser tab shows the total, e.g. "(5) Telegram Archive". History
   imported by a sync pass doesn't count as unread.
-* **Website archive** (🗄 *Websites* on the chat list, `#/archive`): enter a site's address,
-  *Find categories* lists its sections (menu links first, e.g. `/news/`, `/category/sport/`),
-  tick the ones you want and set a page limit. A background job then saves the home page
-  and the pages of those categories to `MEDIA_DIR/web/job<id>/`: listing pages (sub-sections,
-  page 2…) are followed, and the articles they list are saved even when they live elsewhere
-  on the site (`/story-123.html`). Articles come before more listing pages and categories take
-  turns, so a small limit still covers each one. One page per second, robots.txt respected, one
-  job at a time, stops when the disk is almost full. When the job ends, links between saved
-  pages point to the copies and everything else to the live site; scripts are removed
-  (they couldn't run under the `/files/` sandbox anyway) and lazy images are made to load. Only
-  public http(s) hosts are fetched (no localhost / private / tailnet addresses, redirects
-  included). A job interrupted by a restart is marked so and isn't resumed.
+* **Website archive** (🗄 *Websites* on the chat list, `#/archive`): enter a site's address and
+  *Read menu* shows the site's own navbar (its `<nav>` menus, sub-menus indented as on the
+  site; ticking an item ticks its sub-items). Tick what you want, set a page limit, and a
+  background job saves the home page plus each picked item's pages to `MEDIA_DIR/web/job<id>/`:
+  the item's listing pages (sub-sections, page 2…, e.g. everything under `/xa-hoi/` for
+  `/xa-hoi.htm`) are followed, and the articles they list are saved even when they live
+  elsewhere on the site (`/story-123.html`). Articles come before more listing pages and items
+  take turns, so a small limit still covers each one.
+  **Pages keep their look**: stylesheets (with their `@import`s, fonts and background images),
+  icons and images (optional) are saved once per job in `job<id>/assets/` and the page points
+  at them, so it displays like the original even after the site changes. Scripts, event
+  handlers and script hints are removed and lazy images made to load (pages are shown
+  without JavaScript); links between saved pages open the copies. Images take one size each
+  (the plain `src`, else a ≤1000 px `srcset` candidate). One page per second, robots.txt
+  respected, one job at a time, stops when the disk is almost full; only public http(s)
+  hosts are fetched (redirects included). A job interrupted by a restart isn't resumed.
+  nginx serves `/files/web/` as real pages (`text/html`, `text/css`, fonts…) under
+  `CSP: sandbox allow-same-origin; script-src 'none'`: styles and images load, nothing runs.
 * **Theme**: the button in the header switches System → Light → Dark (Telegram's
   night colours); the choice is remembered per browser, and "System" follows the OS live.
 * **Pinned messages** mirror Telegram: every pass re-reads the chat's pinned list, so
@@ -115,8 +121,8 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
 | POST | `/api/sync/run` | trigger a pass now |
 | POST | `/api/chats/{chat_id}/sync` | sync one chat now (409 if its sync is off) |
 | POST | `/api/media/retry-failed` | retry failed media in every chat |
-| POST | `/api/archive/discover` `{url}` | a site's categories `[{prefix, label, url, links, in_nav}]` |
-| POST / GET | `/api/archive/jobs` `{url, categories, max_pages}` | start archiving picked categories / list jobs |
+| POST | `/api/archive/discover` `{url}` | the site's navbar `{menus: [{name, items: [{label, url, prefix, depth}]}]}` |
+| POST / GET | `/api/archive/jobs` `{url, categories, max_pages, save_images}` | start archiving picked menu items / list jobs |
 | GET / DELETE | `/api/archive/jobs/{id}` | a job with its pages / delete it and its files |
 | POST | `/api/archive/jobs/{id}/cancel` | stop a running job |
 

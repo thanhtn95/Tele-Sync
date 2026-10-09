@@ -1552,11 +1552,37 @@ mark.hl {
   margin: 0;
   padding: 0;
 }
-.archive-cats {
-  max-height: 50vh;
+.archive-menus {
+  max-height: 60vh;
   overflow-y: auto;
   display: grid;
-  gap: 2px;
+  gap: 12px;
+}
+.archive-menu-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.archive-menu-head strong {
+  margin-right: auto;
+}
+.archive-filter {
+  width: 100%;
+}
+.archive-top .archive-cat-label {
+  font-weight: 600;
+}
+.archive-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.archive-cats {
+  display: grid;
+  gap: 0;
 }
 .archive-cats label {
   display: flex;
@@ -1571,7 +1597,7 @@ mark.hl {
   background: var(--hover);
 }
 .archive-cat-label {
-  font-weight: 500;
+  font-weight: 400;
 }
 .archive-cat-path {
   margin-left: auto;
