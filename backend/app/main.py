@@ -678,11 +678,12 @@ class ArchiveJobRequest(BaseModel):
     url: str = Field(min_length=1, max_length=2000)
     categories: list[ArchiveCategory] = Field(min_length=1, max_length=200)
     max_pages: int = Field(100, ge=1, le=MAX_PAGES_LIMIT)
+    save_images: bool = True  # stylesheets and fonts are always kept
 
 
 @app.post("/api/archive/discover")
 async def archive_discover(body: DiscoverRequest, request: Request):
-    """Read the site's home page and list its categories (sections) to pick from."""
+    """Read the site's home page and return its navbar menus to pick from."""
     try:
         return await request.app.state.archiver.discover(body.url)
     except ArchiveError as e:
@@ -691,10 +692,11 @@ async def archive_discover(body: DiscoverRequest, request: Request):
 
 @app.post("/api/archive/jobs", status_code=202)
 async def archive_start(body: ArchiveJobRequest, request: Request):
-    """Archive the home page plus every page found in the picked categories (in the background)."""
+    """Archive the home page plus the pages of the picked menu items, with their CSS/images
+    (in the background)."""
     try:
         return await request.app.state.archiver.start(
-            body.url, [c.model_dump() for c in body.categories], body.max_pages
+            body.url, [c.model_dump() for c in body.categories], body.max_pages, body.save_images
         )
     except ArchiveError as e:
         raise HTTPException(400, str(e))

@@ -61,8 +61,8 @@ export const api = {
   syncChat: (id) => request('POST', `/api/chats/${id}/sync`),
   retryFailed: () => request('POST', '/api/media/retry-failed'),
   archiveDiscover: (url) => request('POST', '/api/archive/discover', { url }),
-  archiveStart: (url, categories, maxPages) =>
-    request('POST', '/api/archive/jobs', { url, categories, max_pages: maxPages }),
+  archiveStart: (url, categories, maxPages, saveImages = true) =>
+    request('POST', '/api/archive/jobs', { url, categories, max_pages: maxPages, save_images: saveImages }),
   archiveJobs: () => request('GET', '/api/archive/jobs'),
   archiveJob: (id) => request('GET', `/api/archive/jobs/${id}`),
   archiveCancel: (id) => request('POST', `/api/archive/jobs/${id}/cancel`),

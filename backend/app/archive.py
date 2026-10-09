@@ -1,13 +1,13 @@
-"""Archive a website: find its categories, then save every page of the ones picked.
+"""Archive a website: read its navbar, then save every page of the menu items picked.
 
-Pages land in MEDIA_DIR/web/job<id>/ (served by nginx under /files/). When a job ends,
-links between saved pages are rewritten to the local copies and every other relative
-link/image/stylesheet to the live site, so the archive can be browsed page to page.
+Pages land in MEDIA_DIR/web/job<id>/ (served by nginx under /files/web/), with the
+stylesheets, fonts and images they use in job<id>/assets/, so a saved page looks like the
+original even after the site changes. Scripts are dropped (the archive never runs them).
+When a job ends, links between saved pages are pointed at the local copies.
 """
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import hashlib
 import html
 import ipaddress
@@ -29,6 +29,10 @@ import httpx
 log = logging.getLogger(__name__)
 
 MAX_BYTES = 20 * 1024 * 1024
+ASSET_MAX_BYTES = 15 * 1024 * 1024
+ASSET_CONCURRENCY = 6
+MAX_ASSETS_PER_PAGE = 400
+CSS_DEPTH = 3  # @import chains followed this deep
 MAX_REDIRECTS = 5
 MAX_PAGES_LIMIT = 2000
 CRAWL_DELAY = 1.0  # seconds between requests: be polite to the site
@@ -44,6 +48,21 @@ CATEGORY_WORDS = {"category", "categories", "cat", "c", "tag", "tags", "topic", 
 SKIP_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".css", ".js", ".json", ".xml",
             ".mp4", ".mp3", ".zip", ".woff", ".woff2", ".ttf", ".rss", ".atom"}
 NAV_HINT = re.compile(r"nav|menu", re.I)
+# Category pages often end in .htm(l)/.php (Dân Trí: /xa-hoi.htm, articles under /xa-hoi/…).
+PAGE_EXT = {".htm", ".html", ".php", ".asp", ".aspx", ".shtml"}
+
+# What may be stored as an asset, by Content-Type (anything else, e.g. an HTML error page, is not).
+ASSET_TYPES = {
+    "text/css": ".css", "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/pjpeg": ".jpg", "image/png": ".png",
+    "image/gif": ".gif", "image/webp": ".webp", "image/avif": ".avif", "image/svg+xml": ".svg",
+    "image/x-icon": ".ico", "image/vnd.microsoft.icon": ".ico", "image/bmp": ".bmp",
+    "font/woff2": ".woff2", "font/woff": ".woff", "font/ttf": ".ttf", "font/otf": ".otf",
+    "font/sfnt": ".ttf", "application/font-woff2": ".woff2", "application/font-woff": ".woff",
+    "application/x-font-woff": ".woff", "application/x-font-ttf": ".ttf", "application/x-font-otf": ".otf",
+    "application/font-sfnt": ".ttf", "application/vnd.ms-fontobject": ".eot",
+}
+ASSET_EXTS = set(ASSET_TYPES.values()) | {".jpeg"}
+FONT_EXTS = {".woff2", ".woff", ".ttf", ".otf", ".eot"}
 
 
 class ArchiveError(Exception):
@@ -224,6 +243,126 @@ def parse_html(page: Page) -> tuple[str | None, list[Link]]:
     return title, links
 
 
+class _NavParser(HTMLParser):
+    """Links inside the page's menus (<nav>, role=navigation, or class/id *nav*/*menu*),
+    with how deep each sits in nested lists (sub-menus) and which menu it belongs to."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.menus: list[dict] = []  # {name, strong, items: [(href, text, depth)]}
+        self._stack: list[tuple[str, int | None, bool, bool]] = []  # (tag, menu opened here, list?, footer?)
+        self._menu: int | None = None
+        self._lists = 0  # open <ul>/<ol> inside the current menu
+        self._footer = 0
+        self._a: list | None = None
+
+    def handle_starttag(self, tag, attrs):
+        a = {k: v or "" for k, v in attrs}
+        if self._a is not None:
+            if tag == "img" and a.get("alt"):
+                self._a[1].append(a["alt"])
+            return
+        if tag == "a":
+            if self._menu is not None and not self._footer and a.get("href"):
+                label = a.get("title") or a.get("aria-label") or ""
+                self._a = [a["href"], [], max(self._lists - 1, 0), label]
+            return
+        if tag in ("br", "img", "input", "meta", "link", "hr", "source", "wbr", "area", "col", "embed"):
+            return
+        hint = f"{a.get('class', '')} {a.get('id', '')}"
+        opened = None
+        if self._menu is None and not self._footer and (
+                tag == "nav" or a.get("role") == "navigation" or NAV_HINT.search(hint)):
+            name = a.get("aria-label") or ""
+            strong = tag == "nav" or a.get("role") == "navigation"
+            self.menus.append({"name": name, "strong": strong, "items": []})
+            self._menu = opened = len(self.menus) - 1
+            self._lists = 0
+        is_list = self._menu is not None and tag in ("ul", "ol")
+        self._lists += is_list
+        footer = tag == "footer" or "footer" in hint
+        self._footer += footer
+        self._stack.append((tag, opened, is_list, footer))
+
+    def handle_endtag(self, tag):
+        if self._a is not None and tag != "a":
+            return  # inside a link: its own <span>/<div> were never pushed
+        if tag == "a":
+            if self._a is not None and self._menu is not None:
+                href, text, depth, label = self._a
+                text = " ".join(" ".join(text).split()) or " ".join(label.split())
+                self.menus[self._menu]["items"].append((href, text[:120], depth))
+            self._a = None
+            return
+        if any(t[0] == tag for t in self._stack):  # close up to the matching tag (<li> left open…)
+            while self._stack:
+                t, opened, is_list, footer = self._stack.pop()
+                self._lists -= is_list
+                self._footer -= footer
+                if opened is not None:
+                    self._menu, self._lists = None, 0
+                if t == tag:
+                    break
+
+    def handle_data(self, data):
+        if self._a is not None:
+            self._a[1].append(data)
+
+
+def section_prefix(url: str) -> str | None:
+    """The path a menu item's pages live under: /the-thao → /the-thao/, /xa-hoi.htm → /xa-hoi/."""
+    path = urlsplit(url).path
+    ext = Path(path).suffix.lower()
+    if ext in SKIP_EXT:
+        return None
+    if ext in PAGE_EXT:
+        path = path[: -len(ext)]
+    path = "/" + path.strip("/")
+    return None if path == "/" else path + "/"
+
+
+def read_navbar(page: Page) -> list[dict]:
+    """The site's menus as shown on the page: [{name, items: [{label, url, prefix, depth}]}].
+    Real <nav>/role=navigation menus win over class-name guesses; each URL is listed once."""
+    p = _NavParser()
+    try:
+        p.feed(page.body.decode(page_charset(page), errors="replace"))
+        p.close()
+    except Exception:
+        pass
+    menus = [m for m in p.menus if m["items"]]
+    if any(m["strong"] for m in menus):
+        menus = [m for m in menus if m["strong"]]
+    seen: set[str] = set()
+    out = []
+    for m in menus:
+        items = []
+        for href, text, depth in m["items"]:
+            href = href.strip()
+            if not text or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                continue
+            url = urldefrag(urljoin(page.final_url, href))[0]
+            prefix = section_prefix(url)
+            if prefix is None or not same_site(url, page.final_url) or url in seen:
+                continue
+            seen.add(url)
+            items.append({"label": text, "url": url, "prefix": prefix, "depth": depth})
+        if items:
+            # Depths relative to the menu's top level, without gaps (a child is parent + 1).
+            base = min(i["depth"] for i in items)
+            prev = -1
+            for i in items:
+                i["depth"] = min(i["depth"] - base, prev + 1)
+                prev = i["depth"]
+            out.append({"name": _menu_name(m["name"], len(out)), "items": items[:300]})
+    return out
+
+
+def _menu_name(raw: str, index: int) -> str:
+    raw = " ".join(re.sub(r"[-_]+", " ", raw).split())
+    return raw[:60] if raw else ("Main menu" if index == 0 else f"Menu {index + 1}")
+
+
 def _site(host: str | None) -> str:
     host = (host or "").lower()
     return host[4:] if host.startswith("www.") else host
@@ -300,60 +439,317 @@ def file_name(url: str, content_type: str | None) -> str:
     parts = urlsplit(url)
     mime = (content_type or "").split(";")[0].strip().lower()
     ext = ".html" if mime in ("", "text/html", "application/xhtml+xml") else mimetypes.guess_extension(mime) or ".bin"
-    stem = _UNSAFE.sub("_", unquote(parts.path).strip("/"))[:80].strip("._") or "index"
+    path = unquote(parts.path).strip("/")
+    if Path(path).suffix.lower() in PAGE_EXT:
+        path = path[: -len(Path(path).suffix)]
+    stem = _UNSAFE.sub("_", path)[:80].strip("._") or "index"
     if stem.lower().endswith(ext):
         stem = stem[: -len(ext)]
     return f"{stem}_{hashlib.sha1(url.encode()).hexdigest()[:8]}{ext}"
 
 
-_ATTR = re.compile(r"""(\s(?:href|src|action|poster)\s*=\s*)(?:"([^"]*)"|'([^']*)')""", re.I)
+_ATTR = re.compile(r"""(\s(?:href|src|action|poster|data)\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))""", re.I)
 _BASE_TAG = re.compile(r"<base\s[^>]*>", re.I)
 _SCRIPT = re.compile(r"<script\b[^>]*>.*?</script\s*>", re.I | re.S)
-_IMG = re.compile(r"<img\b[^>]*>", re.I)
+_META_DROP = re.compile(r"""<meta\b[^>]*(?:charset\s*=|http-equiv\s*=\s*["']?(?:content-type|refresh|content-security-policy))[^>]*>""", re.I)
+_HEAD = re.compile(r"<head\b[^>]*>", re.I)
+_ANY_TAG = re.compile(r"<[a-zA-Z][^<>]*>")
+_ON_ATTR = re.compile(r"""\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)""", re.I)
+_TAG = re.compile(r"<(img|source|link|video|body|table|td|th|input)\b[^>]*>", re.I)
 _LAZY = re.compile(r"""\sdata-(?:src|original|lazy-src|lazy)\s*=\s*("[^"]*"|'[^']*')""", re.I)
 _LAZY_SET = re.compile(r"""\sdata-(?:srcset|lazy-srcset)\s*=\s*("[^"]*"|'[^']*')""", re.I)
 _SRCSET = re.compile(r"""\ssrcset\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)""", re.I)
 _SRC = re.compile(r"""\ssrc\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)""", re.I)
+_REL = re.compile(r"""\srel\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""", re.I)
+_AS_STYLE = re.compile(r"""\sas\s*=\s*["']?style\b""", re.I)
+_STYLE_BLOCK = re.compile(r"(<style\b[^>]*>)(.*?)(</style\s*>)", re.I | re.S)
+_STYLE_ATTR = re.compile(r"""(\sstyle\s*=\s*)(?:"([^"]*)"|'([^']*)')""", re.I)
+_CSS_URL = re.compile(r"""url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"\s]*))\s*\)""", re.I)
+_CSS_IMPORT = re.compile(r"""@import\s+(?:"([^"]*)"|'([^']*)')""", re.I)
+_SRCSET_ITEM = re.compile(r"\s*(\S+?)(?:\s+([\d.]+)([wx]))?\s*(?:,|$)")
+_ATTR_VALUE = r"""\s{name}\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))"""
+ASSETS_DIR = "assets"
+
+
+_CLASS = re.compile(r"""(\sclass\s*=\s*)(?:"([^"]*)"|'([^']*)')""", re.I)
+_LOADED = {"lazyload": "lazyloaded", "lazyloading": "lazyloaded"}  # lazysizes' finished state
+
+
+def _loaded_classes(m: re.Match) -> str:
+    """Placeholder styles (blur, lazysizes' hidden state) are lifted by JS once an image loads."""
+    classes = (m.group(2) if m.group(2) is not None else m.group(3)).split()
+    kept = [_LOADED.get(c, c) for c in classes if "blur" not in c.lower()]
+    return f'{m.group(1)}"{" ".join(kept)}"'
 
 
 def _unlazy(m: re.Match) -> str:
     """Lazy-loaded images keep the real URL in data-src(set) and need JS, which the archive can't run."""
     tag = m.group(0)
+    name_end = len(m.group(1)) + 1
     lazy, lazy_set = _LAZY.search(tag), _LAZY_SET.search(tag)
-    if lazy:
+    if lazy and m.group(1).lower() == "img":
         tag = _SRC.sub("", tag)
-        tag = tag[:4] + f" src={lazy.group(1)}" + tag[4:]
+        tag = tag[:name_end] + f" src={lazy.group(1)}" + tag[name_end:]
+    if lazy or lazy_set:
+        tag = _CLASS.sub(_loaded_classes, tag)
     if lazy_set:
         tag = _SRCSET.sub("", tag)
-        tag = tag[:4] + f" srcset={lazy_set.group(1)}" + tag[4:]
+        tag = tag[:name_end] + f" srcset={lazy_set.group(1)}" + tag[name_end:]
+    if m.group(1).lower() == "link":
+        rel = _REL.search(tag)
+        rels = (rel and (rel.group(1) or rel.group(2) or rel.group(3)) or "").lower().split()
+        if "preload" in rels and _AS_STYLE.search(tag):
+            # <link rel=preload as=style onload="this.rel='stylesheet'">: the switch needs JS
+            tag = tag[: rel.start()] + ' rel="stylesheet"' + tag[rel.end():]
+        elif {"preload", "modulepreload", "prefetch", "preconnect", "dns-prefetch", "prerender"} & set(rels):
+            return ""  # hints for scripts/requests the archive never makes
     return tag
 
 
-def rewrite_links(text: str, page_url: str, local: dict[str, str]) -> str:
-    """Links to archived pages → their local file; other relative URLs → absolute live URLs.
-    Also drops scripts and un-lazies images so pages render without JavaScript."""
-    # Scripts can't run in the archive (served with CSP sandbox) and would only load ads/trackers.
-    text = _SCRIPT.sub("", _BASE_TAG.sub("", text))
-    text = _IMG.sub(_unlazy, text)
+def _attr(tag: str, name: str) -> re.Match | None:
+    return re.search(_ATTR_VALUE.format(name=name), tag, re.I)
 
-    def sub(m: re.Match) -> str:
-        raw = m.group(2) if m.group(2) is not None else m.group(3)
+
+def _attr_value(m: re.Match | None) -> str | None:
+    if m is None:
+        return None
+    return html.unescape(next(g for g in m.groups() if g is not None)).strip()
+
+
+SRCSET_MAX_W = 1000  # widest image taken from a srcset: enough for a page, not a 4K original
+
+
+def _srcset_best(value: str) -> str | None:
+    """One candidate of a srcset: the widest up to SRCSET_MAX_W (or 1.5x), else the smallest."""
+    cands = []
+    for m in _SRCSET_ITEM.finditer(value):
+        if m.group(1):
+            size = float(m.group(2)) if m.group(2) else 1.0
+            limit = SRCSET_MAX_W if m.group(3) == "w" else 1.5
+            cands.append((size <= limit, size if size <= limit else -size, m.group(1)))
+    return max(cands)[2] if cands else None
+
+
+def _is_fetchable(value: str | None) -> bool:
+    return bool(value) and not value.startswith(("data:", "#", "javascript:", "mailto:", "tel:", "about:"))
+
+
+def _css_refs(css: str, base: str) -> list[tuple[str, str]]:
+    """(absolute url, kind) of everything a stylesheet loads: @import → css, url() → file."""
+    refs = []
+    for m in _CSS_IMPORT.finditer(css):
+        v = (m.group(1) if m.group(1) is not None else m.group(2)).strip()
+        if _is_fetchable(v):
+            refs.append((urljoin(base, v), "css"))
+    for m in _CSS_URL.finditer(css):
+        v = next(g for g in m.groups() if g is not None).strip()
+        if _is_fetchable(v):
+            kind = "css" if css[max(0, m.start() - 12): m.start()].lower().rstrip().endswith("@import") else "file"
+            refs.append((urljoin(base, v), kind))
+    return refs
+
+
+def _css_localize(css: str, base: str, local: dict[str, str], prefix: str) -> str:
+    """Point a stylesheet's url()/@import at saved copies (prefix + name); others made absolute."""
+    def target(v: str) -> str:
+        if not _is_fetchable(v):
+            return v
+        absolute = urljoin(base, v)
+        name = local.get(urldefrag(absolute)[0])
+        return prefix + name if name else absolute
+
+    css = _CSS_IMPORT.sub(lambda m: f'@import "{target((m.group(1) if m.group(1) is not None else m.group(2)).strip())}"', css)
+    return _CSS_URL.sub(lambda m: f'url("{target(next(g for g in m.groups() if g is not None).strip())}")', css)
+
+
+def prepare_html(text: str, page_url: str) -> str:
+    """Make a fetched page work without JavaScript and without the live site's relative paths:
+    drop scripts, event handlers, <base>, refresh/CSP/charset metas and script/prefetch hints;
+    un-lazy images; resolve every href/src."""
+    text = _SCRIPT.sub("", _BASE_TAG.sub("", text))
+    text = _META_DROP.sub("", text)
+    text = _TAG.sub(_unlazy, text)
+    text = _ANY_TAG.sub(lambda m: _ON_ATTR.sub("", m.group(0)), text)  # onclick=… can't run either
+
+    def absolute(m: re.Match) -> str:
+        raw = next(g for g in m.groups()[1:] if g is not None)
         value = html.unescape(raw).strip()
-        if not value or value.startswith(("#", "data:", "mailto:", "tel:", "javascript:")):
+        if not _is_fetchable(value):
             return m.group(0)
-        absolute = urljoin(page_url, value)
-        target, frag = urldefrag(absolute)
-        new = local.get(target)
-        new = (new + (f"#{frag}" if frag else "")) if new else absolute
-        return f'{m.group(1)}"{html.escape(new, quote=True)}"'
+        return f'{m.group(1)}"{html.escape(urljoin(page_url, value), quote=True)}"'
+
+    text = _ATTR.sub(absolute, text)
+    m = _HEAD.search(text)
+    meta = '<meta charset="utf-8">'
+    return text[: m.end()] + meta + text[m.end():] if m else meta + text
+
+
+def html_assets(text: str, page_url: str, images: bool = True) -> list[tuple[str, str]]:
+    """(url, kind) of the stylesheets, icons and (optionally) images a prepared page uses."""
+    refs: list[tuple[str, str]] = []
+    for m in _TAG.finditer(text):
+        tag, name = m.group(0), m.group(1).lower()
+        if name == "link":
+            rel = (_attr_value(_attr(tag, "rel")) or "").lower().split()
+            href = _attr_value(_attr(tag, "href"))
+            if "stylesheet" in rel and _is_fetchable(href):
+                refs.append((urljoin(page_url, href), "css"))
+            elif images and "icon" in " ".join(rel) and _is_fetchable(href):
+                refs.append((urljoin(page_url, href), "file"))
+            continue
+        if not images:
+            continue
+        # src only on <img>: <source>/<video> src would be whole videos
+        for attr in {"img": ("src",), "video": ("poster",)}.get(name, ("background",)):
+            v = _attr_value(_attr(tag, attr))
+            if _is_fetchable(v) and name != "input":
+                refs.append((urljoin(page_url, v), "file"))
+        if name == "img" and _is_fetchable(_attr_value(_attr(tag, "src"))):
+            continue  # the plain src is enough; its srcset is pointed at the same copy
+        best = _srcset_best(_attr_value(_attr(tag, "srcset")) or "")
+        if _is_fetchable(best):
+            refs.append((urljoin(page_url, best), "file"))
+    css_parts = [m.group(2) for m in _STYLE_BLOCK.finditer(text)]
+    css_parts += [html.unescape(m.group(2) if m.group(2) is not None else m.group(3))
+                  for m in _STYLE_ATTR.finditer(text) if "url(" in (m.group(2) or m.group(3) or "")]
+    for css in css_parts:
+        refs += [r for r in _css_refs(css, page_url) if images or r[1] == "css"]
+    out, seen = [], set()
+    for url, kind in refs:
+        url = urldefrag(url)[0]
+        if url not in seen and urlsplit(url).scheme in ("http", "https"):
+            seen.add(url)
+            out.append((url, kind))
+    return out[:MAX_ASSETS_PER_PAGE]
+
+
+def localize_html(text: str, page_url: str, local: dict[str, str]) -> str:
+    """Point a prepared page's stylesheets/images at their saved copies (assets/<name>)."""
+    prefix = ASSETS_DIR + "/"
+
+    def tag_sub(m: re.Match) -> str:
+        tag, name = m.group(0), m.group(1).lower()
+        for attr in ("href", "src", "poster", "background"):
+            if attr == "href" and name != "link":
+                continue
+            am = _attr(tag, attr)
+            v = _attr_value(am)
+            saved = local.get(urldefrag(urljoin(page_url, v))[0]) if _is_fetchable(v) else None
+            if saved:
+                tag = tag[: am.start()] + f' {attr}="{html.escape(prefix + saved, quote=True)}"' + tag[am.end():]
+        am = _attr(tag, "srcset")
+        if am:
+            best = _srcset_best(_attr_value(am) or "")
+            saved = local.get(urldefrag(urljoin(page_url, best))[0]) if _is_fetchable(best) else None
+            src = _attr_value(_attr(tag, "src")) if name == "img" else None
+            if src and src.startswith(prefix):
+                saved = src[len(prefix):]  # src saved: show that copy whatever the screen size
+            if saved:  # one saved candidate instead of every size
+                tag = tag[: am.start()] + f' srcset="{html.escape(prefix + saved, quote=True)}"' + tag[am.end():]
+            else:  # not saved: at least make the candidates absolute
+                value = ", ".join(
+                    urljoin(page_url, i.group(1)) + (f" {i.group(2)}{i.group(3)}" if i.group(2) else "")
+                    for i in _SRCSET_ITEM.finditer(_attr_value(am) or "") if i.group(1))
+                tag = tag[: am.start()] + f' srcset="{html.escape(value, quote=True)}"' + tag[am.end():]
+        return tag
+
+    text = _TAG.sub(tag_sub, text)
+    text = _STYLE_BLOCK.sub(lambda m: m.group(1) + _css_localize(m.group(2), page_url, local, prefix) + m.group(3), text)
+
+    def style_attr(m: re.Match) -> str:
+        raw = m.group(2) if m.group(2) is not None else m.group(3)
+        if "url(" not in raw:
+            return m.group(0)
+        css = _css_localize(html.unescape(raw), page_url, local, prefix)
+        return f'{m.group(1)}"{html.escape(css, quote=True)}"'
+
+    return _STYLE_ATTR.sub(style_attr, text)
+
+
+def link_pages(text: str, local: dict[str, str]) -> str:
+    """Links (href) to other saved pages → their local file (all in the same folder)."""
+    def sub(m: re.Match) -> str:
+        raw = next(g for g in m.groups()[1:] if g is not None)
+        target, frag = urldefrag(html.unescape(raw).strip())
+        name = local.get(target)
+        if not name or not m.group(1).strip().lower().startswith("href"):
+            return m.group(0)
+        return f'{m.group(1)}"{html.escape(name + (f"#{frag}" if frag else ""), quote=True)}"'
 
     return _ATTR.sub(sub, text)
 
 
+def asset_name(url: str, content_type: str | None) -> str | None:
+    """File name for a saved asset, or None if its type isn't one we keep."""
+    mime = (content_type or "").split(";")[0].strip().lower()
+    ext = ASSET_TYPES.get(mime)
+    if ext is None:
+        guess = Path(urlsplit(url).path).suffix.lower()
+        if guess in ASSET_EXTS and mime in ("", "application/octet-stream", "binary/octet-stream", "text/plain"):
+            ext = ".jpg" if guess == ".jpeg" else guess
+    if ext is None:
+        return None
+    return hashlib.sha1(url.encode()).hexdigest()[:20] + ext
+
+
+class AssetStore:
+    """Downloads a job's stylesheets/fonts/images once each into job<id>/assets/."""
+
+    def __init__(self, folder: Path, client: httpx.AsyncClient, check_host, disk_low, images: bool = True) -> None:
+        self.folder, self.client, self.check_host, self.disk_low = folder, client, check_host, disk_low
+        self.images = images
+        self.saved: dict[str, str] = {}  # url → file name
+        self._tasks: dict[str, asyncio.Task] = {}
+        self._sem = asyncio.Semaphore(ASSET_CONCURRENCY)
+        self.count = self.bytes = 0
+
+    async def get_all(self, refs: list[tuple[str, str]], depth: int = 0) -> None:
+        await asyncio.gather(*(self._get(url, kind, depth) for url, kind in refs))
+
+    async def _get(self, url: str, kind: str, depth: int) -> None:
+        task = self._tasks.get(url)
+        if task is None:
+            task = self._tasks[url] = asyncio.ensure_future(self._fetch(url, kind, depth))
+        try:
+            await asyncio.shield(task)
+        except Exception:
+            pass
+
+    async def _fetch(self, url: str, kind: str, depth: int) -> None:
+        if self.disk_low():
+            return
+        async with self._sem:
+            try:
+                page = await fetch_page(self.client, url, max_bytes=ASSET_MAX_BYTES, check_host=self.check_host)
+            except ArchiveError as e:
+                log.debug("asset %s not saved: %s", url, e)
+                return
+        name = asset_name(url, page.content_type)
+        if name is None and kind == "css":
+            name = hashlib.sha1(url.encode()).hexdigest()[:20] + ".css"  # some servers say text/plain
+        if name is None:
+            return
+        body = page.body
+        if name.endswith(".css"):
+            css = body.decode(page_charset(page), errors="replace")
+            if depth < CSS_DEPTH:
+                refs = _css_refs(css, page.final_url)
+                if not self.images:  # stylesheets and fonts only
+                    refs = [r for r in refs if r[1] == "css" or Path(urlsplit(r[0]).path).suffix.lower() in FONT_EXTS]
+                await self.get_all(refs, depth + 1)
+            # Saved next to this file: a bare name works.
+            body = _css_localize(css, page.final_url, self.saved, "").encode()
+        self.folder.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread((self.folder / name).write_bytes, body)
+        self.saved[url] = self.saved[page.final_url] = name
+        self.count += 1
+        self.bytes += len(body)
+
+
 # ---- jobs -------------------------------------------------------------------------
 
-JOB_COLS = ("id, url, title, categories, max_pages, status, pages_saved, pages_failed, error, "
-            "created_at, finished_at")
+JOB_COLS = ("id, url, title, categories, max_pages, save_images, status, pages_saved, pages_failed, "
+            "assets_saved, assets_bytes, pages_bytes, error, created_at, finished_at")
 
 
 class WebArchiver:
@@ -372,10 +768,16 @@ class WebArchiver:
             page = await fetch_page(client, url, check_host=self.check_host)
         if not page.is_html:
             raise ArchiveError("that address is not a web page")
-        title, cats = find_categories(page)
-        return {"url": page.final_url, "title": title, "categories": cats}
+        title, _ = parse_html(page)
+        menus = read_navbar(page)
+        if not menus:  # no menu found: offer the sections linked from the page instead
+            _, cats = find_categories(page)
+            menus = [{"name": "Sections linked on the home page",
+                      "items": [{"label": c["label"], "url": c["url"], "prefix": c["prefix"], "depth": 0}
+                                for c in cats]}] if cats else []
+        return {"url": page.final_url, "title": title, "menus": menus}
 
-    async def start(self, url: str, categories: list[dict], max_pages: int) -> dict:
+    async def start(self, url: str, categories: list[dict], max_pages: int, save_images: bool = True) -> dict:
         url = normalize_url(url)
         cats = []
         for c in categories:
@@ -386,8 +788,9 @@ class WebArchiver:
         if not cats:
             raise ArchiveError("pick at least one category")
         row = await self.pool.fetchrow(
-            f"INSERT INTO web_archive_jobs (url, categories, max_pages) VALUES ($1, $2, $3) RETURNING {JOB_COLS}",
-            url, cats, max_pages,
+            f"INSERT INTO web_archive_jobs (url, categories, max_pages, save_images) VALUES ($1, $2, $3, $4) "
+            f"RETURNING {JOB_COLS}",
+            url, cats, max_pages, save_images,
         )
         self._tasks[row["id"]] = asyncio.create_task(self._run(row["id"]), name=f"web-archive-{row['id']}")
         return dict(row)
@@ -454,7 +857,8 @@ class WebArchiver:
         )
 
     async def _crawl(self, job_id: int) -> None:
-        job = await self.pool.fetchrow("SELECT url, categories, max_pages FROM web_archive_jobs WHERE id = $1", job_id)
+        job = await self.pool.fetchrow(
+            "SELECT url, categories, max_pages, save_images FROM web_archive_jobs WHERE id = $1", job_id)
         cats = job["categories"]
         folder = self.media_dir / "web" / f"job{job_id}"
         folder.mkdir(parents=True, exist_ok=True)
@@ -482,6 +886,7 @@ class WebArchiver:
             return None
 
         async with self.client_factory() as client:
+            assets = AssetStore(folder / ASSETS_DIR, client, self.check_host, self._disk_low, job["save_images"])
             robots = await self._robots(client, job["url"])
             while saved < job["max_pages"] and (item := next_url()):
                 url, prefix, expand = item
@@ -507,7 +912,7 @@ class WebArchiver:
                         if link.url in seen or not same_site(link.url, job["url"]):
                             continue
                         hit = next((c["prefix"] for c in cats if in_category(link.url, c["prefix"])), None)
-                        if hit and category_prefix(link.url) is not None:
+                        if hit and Path(urlsplit(link.url).path).suffix.lower() not in SKIP_EXT:
                             # more of a picked category (sub-pages, page 2…): follow its links too
                             seen.add(link.url)
                             listings[hit].append(link.url)
@@ -517,8 +922,19 @@ class WebArchiver:
                             seen.add(link.url)
                             articles[prefix].append(link.url)
                 name = file_name(page.final_url, page.content_type)
-                await asyncio.to_thread((folder / name).write_bytes, page.body)
-                await self._record(job_id, url, prefix, page=page, title=title,
+                body = page.body
+                if page.is_html:
+                    # Saved as UTF-8, with its stylesheets/fonts/images next to it.
+                    text = prepare_html(body.decode(page_charset(page), errors="replace"), page.final_url)
+                    before = (assets.count, assets.bytes)
+                    await assets.get_all(html_assets(text, page.final_url, images=job["save_images"]))
+                    body = localize_html(text, page.final_url, assets.saved).encode()
+                    await self.pool.execute(
+                        "UPDATE web_archive_jobs SET assets_saved = assets_saved + $2, "
+                        "assets_bytes = assets_bytes + $3 WHERE id = $1",
+                        job_id, assets.count - before[0], assets.bytes - before[1])
+                await asyncio.to_thread((folder / name).write_bytes, body)
+                await self._record(job_id, url, prefix, page=page, title=title, size=len(body),
                                    file_path=f"web/job{job_id}/{name}")
                 if prefix is None and title:
                     await self.pool.execute("UPDATE web_archive_jobs SET title = $2 WHERE id = $1", job_id, title)
@@ -535,7 +951,8 @@ class WebArchiver:
         return rp
 
     async def _record(self, job_id: int, url: str, prefix: str | None, *, page: Page | None = None,
-                      title: str | None = None, file_path: str | None = None, error: str | None = None) -> None:
+                      title: str | None = None, size: int | None = None, file_path: str | None = None,
+                      error: str | None = None) -> None:
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute(
                 """
@@ -544,10 +961,11 @@ class WebArchiver:
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 """,
                 job_id, url, page.final_url if page else url, prefix, page.status if page else None,
-                page.content_type if page else None, title, len(page.body) if page else None, file_path, error,
+                page.content_type if page else None, title, size, file_path, error,
             )
             col = "pages_failed" if error else "pages_saved"
-            await conn.execute(f"UPDATE web_archive_jobs SET {col} = {col} + 1 WHERE id = $1", job_id)
+            await conn.execute(f"UPDATE web_archive_jobs SET {col} = {col} + 1, "
+                               "pages_bytes = pages_bytes + $2 WHERE id = $1", job_id, size or 0)
 
     async def _rewrite(self, job_id: int) -> None:
         rows = await self.pool.fetch(
@@ -559,18 +977,15 @@ class WebArchiver:
             name = r["file_path"].rsplit("/", 1)[-1]
             local[r["url"]] = local[r["final_url"]] = name  # same folder: a bare file name works
         for r in rows:
-            page = Page(r["url"], r["final_url"], 200, r["content_type"], b"")
-            if not page.is_html:
+            if not Page(r["url"], r["final_url"], 200, r["content_type"], b"").is_html:
                 continue
             path = self.media_dir / r["file_path"]
 
-            def work(path=path, page=page):
+            def work(path=path):
                 try:
-                    body = path.read_bytes()
+                    text = path.read_text("utf-8", errors="replace")  # saved as UTF-8
                 except FileNotFoundError:
                     return
-                cs = page_charset(Page(page.url, page.final_url, 200, page.content_type, body))
-                text = rewrite_links(body.decode(cs, errors="replace"), page.final_url, local)
-                path.write_bytes(text.encode(cs, errors="xmlcharrefreplace"))
+                path.write_text(link_pages(text, local), "utf-8")
 
             await asyncio.to_thread(work)
