@@ -19,6 +19,7 @@ from telethon import events, utils
 from telethon.errors import FloodWaitError, RPCError
 
 from . import auth, db
+from .archive import ArchiveError, archive_website
 from .config import settings
 from .gphotos import GPhotos
 from .service import service_text
@@ -656,6 +657,39 @@ async def gphotos_urls(body: UrlsRequest, request: Request):
     if gp is None:
         raise HTTPException(503, "Google Photos not configured")
     return {"urls": await gp.base_urls(body.media_ids, force=body.force)}
+
+
+# ---- web archive ------------------------------------------------------------
+
+class ArchiveRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2000)
+
+
+ARCHIVE_COLS = "id, url, final_url, status, content_type, title, size, file_path, archived_at"
+
+
+@app.post("/api/archive", status_code=201)
+async def archive_url(body: ArchiveRequest, pool=Depends(pool_dep)):
+    """Save a snapshot of a web page; open it at /files/<file_path>."""
+    try:
+        a = await archive_website(body.url, settings.media_dir)
+    except ArchiveError as e:
+        raise HTTPException(400, str(e))
+    row = await pool.fetchrow(
+        f"""
+        INSERT INTO web_archives (url, final_url, status, content_type, title, size, file_path, archived_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING {ARCHIVE_COLS}
+        """,
+        a.url, a.final_url, a.status, a.content_type, a.title, a.size, a.rel_path, a.archived_at,
+    )
+    return dict(row)
+
+
+@app.get("/api/archive")
+async def list_archives(limit: int = Query(50, ge=1, le=500), pool=Depends(pool_dep)):
+    """Saved snapshots, newest first."""
+    rows = await pool.fetch(f"SELECT {ARCHIVE_COLS} FROM web_archives ORDER BY archived_at DESC LIMIT $1", limit)
+    return [dict(r) for r in rows]
 
 
 # ---- sync -----------------------------------------------------------------

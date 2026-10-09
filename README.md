@@ -74,6 +74,10 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
   bottom of a chat show as a count on the chat (synced chats only, 999+ max); those chats
   sort first and the browser tab shows the total, e.g. "(5) Telegram Archive". History
   imported by a sync pass doesn't count as unread.
+* **Archive a web page**: `POST /api/archive {url}` downloads the page (redirects
+  followed, max 20 MB) into `MEDIA_DIR/web/` and records it in `web_archives`; open it at
+  `/files/<file_path>`. HTML gets a `<base>` tag so its images/CSS still load from the live
+  site. Only public http(s) hosts are allowed (no localhost / private / tailnet addresses).
 * **Theme**: the button in the header switches System → Light → Dark (Telegram's
   night colours); the choice is remembered per browser, and "System" follows the OS live.
 * **Pinned messages** mirror Telegram: every pass re-reads the chat's pinned list, so
@@ -103,6 +107,7 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
 | POST | `/api/sync/run` | trigger a pass now |
 | POST | `/api/chats/{chat_id}/sync` | sync one chat now (409 if its sync is off) |
 | POST | `/api/media/retry-failed` | retry failed media in every chat |
+| POST / GET | `/api/archive` `{url}` / `?limit=50` | save a snapshot of a web page / list snapshots, newest first |
 
 Chat ids are Telethon "marked" ids (`-100…` for channels/supergroups). `grouped_id` is
 returned as a string because it does not fit in a JS number.
