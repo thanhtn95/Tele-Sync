@@ -225,8 +225,27 @@ function NewArchive({ onStarted }) {
   );
 }
 
+/** Ask, then archive the job's site again with the same menu items (old pages are replaced). */
+async function rerunJob(job) {
+  const ok = window.confirm(
+    `Archive ${host(job.url)} again with the same menu items?\n\n` +
+      `The ${job.pages_saved} saved pages are replaced by fresh copies (with the site's CSS and images).`,
+  );
+  if (!ok) return false;
+  try {
+    await api.archiveRerun(job.id);
+    return true;
+  } catch (e) {
+    window.alert(e.message);
+    return false;
+  }
+}
+
 function JobRow({ job, onChanged }) {
   const active = ACTIVE.has(job.status);
+  const rerun = async () => {
+    if (await rerunJob(job)) onChanged();
+  };
   const cancel = async () => {
     await api.archiveCancel(job.id).catch(() => {});
     onChanged();
@@ -253,9 +272,14 @@ function JobRow({ job, onChanged }) {
       {active ? (
         <button onClick={cancel}>Stop</button>
       ) : (
-        <button className="icon-btn" onClick={remove} title="Delete this archive">
-          🗑
-        </button>
+        <>
+          <button onClick={rerun} title="Archive this site again with the same menu items">
+            ↻ Re-archive
+          </button>
+          <button className="icon-btn" onClick={remove} title="Delete this archive">
+            🗑
+          </button>
+        </>
       )}
     </li>
   );
@@ -316,8 +340,12 @@ function JobDetail({ jobId }) {
           {job.pages_failed ? ` · ${job.pages_failed} failed` : ''} · up to {job.max_pages} pages
           {job.error ? ` · ${job.error}` : ''}
         </span>
-        {ACTIVE.has(job.status) && (
+        {ACTIVE.has(job.status) ? (
           <span className="muted small">Links between saved pages are switched to the copies when it finishes.</span>
+        ) : (
+          <div>
+            <button onClick={async () => (await rerunJob(job)) && load()}>↻ Re-archive</button>
+          </div>
         )}
       </div>
       {groups.map((g) => (

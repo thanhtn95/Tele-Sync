@@ -90,6 +90,9 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
   (the plain `src`, else a ≤1000 px `srcset` candidate). One page per second, robots.txt
   respected, one job at a time, stops when the disk is almost full; only public http(s)
   hosts are fetched (redirects included). A job interrupted by a restart isn't resumed.
+  *↻ Re-archive* on a finished job runs it again with the same menu items and settings,
+  replacing its saved pages and files (same id/link), e.g. to refresh it or to give archives
+  made before assets were kept their CSS and images.
   nginx serves `/files/web/` as real pages (`text/html`, `text/css`, fonts…) under
   `CSP: sandbox allow-same-origin; script-src 'none'`: styles and images load, nothing runs.
 * **Theme**: the button in the header switches System → Light → Dark (Telegram's
@@ -125,6 +128,7 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
 | POST / GET | `/api/archive/jobs` `{url, categories, max_pages, save_images}` | start archiving picked menu items / list jobs |
 | GET / DELETE | `/api/archive/jobs/{id}` | a job with its pages / delete it and its files |
 | POST | `/api/archive/jobs/{id}/cancel` | stop a running job |
+| POST | `/api/archive/jobs/{id}/rerun` | archive the job's site again, replacing its pages (409 while running) |
 
 Chat ids are Telethon "marked" ids (`-100…` for channels/supergroups). `grouped_id` is
 returned as a string because it does not fit in a JS number.

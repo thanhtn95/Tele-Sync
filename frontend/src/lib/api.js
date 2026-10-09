@@ -66,6 +66,7 @@ export const api = {
   archiveJobs: () => request('GET', '/api/archive/jobs'),
   archiveJob: (id) => request('GET', `/api/archive/jobs/${id}`),
   archiveCancel: (id) => request('POST', `/api/archive/jobs/${id}/cancel`),
+  archiveRerun: (id) => request('POST', `/api/archive/jobs/${id}/rerun`),
   archiveDelete: (id) => request('DELETE', `/api/archive/jobs/${id}`),
 };
 

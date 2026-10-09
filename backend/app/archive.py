@@ -795,6 +795,28 @@ class WebArchiver:
         self._tasks[row["id"]] = asyncio.create_task(self._run(row["id"]), name=f"web-archive-{row['id']}")
         return dict(row)
 
+    async def rerun(self, job_id: int) -> dict | None:
+        """Archive a finished job's site again with the same menu items and settings, replacing
+        its saved pages and files (same id, so links to it keep working). None if no such job."""
+        task = self._tasks.get(job_id)
+        if task is not None and not task.done():
+            raise ArchiveError("this archive is still running")
+        async with self.pool.acquire() as conn, conn.transaction():
+            row = await conn.fetchrow(
+                "UPDATE web_archive_jobs SET status = 'queued', pages_saved = 0, pages_failed = 0, "
+                "assets_saved = 0, assets_bytes = 0, pages_bytes = 0, error = NULL, created_at = now(), "
+                f"finished_at = NULL WHERE id = $1 AND status NOT IN ('queued', 'running') RETURNING {JOB_COLS}",
+                job_id,
+            )
+            if row is None:
+                if await conn.fetchval("SELECT EXISTS (SELECT 1 FROM web_archive_jobs WHERE id = $1)", job_id):
+                    raise ArchiveError("this archive is still running")
+                return None
+            await conn.execute("DELETE FROM web_archive_pages WHERE job_id = $1", job_id)
+        await asyncio.to_thread(shutil.rmtree, self.media_dir / "web" / f"job{job_id}", True)
+        self._tasks[job_id] = asyncio.create_task(self._run(job_id), name=f"web-archive-{job_id}")
+        return dict(row)
+
     async def cancel(self, job_id: int) -> bool:
         task = self._tasks.get(job_id)
         if task is None or task.done():

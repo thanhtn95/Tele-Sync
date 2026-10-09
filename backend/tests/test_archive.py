@@ -285,3 +285,28 @@ async def test_interrupted_on_restart(pool, tmp_path):
     await pool.execute("INSERT INTO web_archive_jobs (url, categories, max_pages, status) VALUES ($1, '[]', 5, 'running')", SITE)
     await _archiver(pool, tmp_path).mark_interrupted()
     assert await pool.fetchval("SELECT status FROM web_archive_jobs") == "interrupted"
+
+
+async def test_rerun_replaces_pages(api, pool, tmp_path):  # noqa: F811
+    app.state.archiver = arch = _archiver(pool, tmp_path)
+    h = api.http
+    job = await arch.start(SITE, [{"prefix": "/sport/", "url": SITE + "/sport/"}], max_pages=5, save_images=False)
+    await arch._tasks[job["id"]]
+    folder = tmp_path / "web" / f"job{job['id']}"
+    stale = folder / "stale_00000000.html"  # e.g. a page the site no longer has
+    stale.write_text("old")
+    old_ids = [p["id"] for p in (await h.get(f"/api/archive/jobs/{job['id']}")).json()["pages"]]
+
+    r = await h.post(f"/api/archive/jobs/{job['id']}/rerun")
+    assert r.status_code == 202 and r.json()["status"] == "queued" and r.json()["pages_saved"] == 0
+    assert r.json()["save_images"] is False and r.json()["categories"][0]["prefix"] == "/sport/"
+    assert (await h.post(f"/api/archive/jobs/{job['id']}/rerun")).status_code == 409  # still running
+    await arch._tasks[job["id"]]
+
+    detail = (await h.get(f"/api/archive/jobs/{job['id']}")).json()
+    assert detail["status"] == "done" and detail["pages_saved"] == 3  # same id, fresh pages
+    assert [p["title"] for p in detail["pages"]] == ["Site & Co", "Sport", "X"]
+    assert not set(old_ids) & {p["id"] for p in detail["pages"]}
+    assert not stale.exists() and all((tmp_path / p["file_path"]).exists() for p in detail["pages"])
+    assert len((await h.get("/api/archive/jobs")).json()) == 1
+    assert (await h.post("/api/archive/jobs/999/rerun")).status_code == 404

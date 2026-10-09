@@ -727,6 +727,18 @@ async def archive_cancel(job_id: int, request: Request):
     return {"cancelled": await request.app.state.archiver.cancel(job_id)}
 
 
+@app.post("/api/archive/jobs/{job_id}/rerun", status_code=202)
+async def archive_rerun(job_id: int, request: Request):
+    """Archive the job's site again (same menu items and settings), replacing its saved pages."""
+    try:
+        job = await request.app.state.archiver.rerun(job_id)
+    except ArchiveError as e:
+        raise HTTPException(409, str(e))
+    if job is None:
+        raise HTTPException(404, "archive not found")
+    return job
+
+
 @app.delete("/api/archive/jobs/{job_id}")
 async def archive_delete(job_id: int, request: Request):
     """Delete a job, its page records and its saved files."""
