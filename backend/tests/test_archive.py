@@ -206,6 +206,24 @@ def test_listing_links():
     assert listing_links(page, parse_html(page)[1], "/news/", set())[0] == [SITE + f"/news/story{i}" for i in range(4)]
 
 
+def test_listing_links_real_page_shapes():
+    # A page-wide wrapper with a nav/sidebar class (Wired: <body class="site-navigation">,
+    # CSS-Tricks: <div class="articles-and-sidebar">) doesn't hide every post; a real sidebar
+    # inside it still does. WordPress post cards keep their title in <header>.
+    cards = b"".join(
+        b'<article><header class="entry-header"><h2><a href="/blog/post-%d/">Post %d</a></h2></header>'
+        b'<a href="/author/ann/">Ann</a><footer class="entry-footer"><a href="/tag/x/">x</a></footer></article>'
+        % (i, i) for i in range(4))
+    body = (b'<body class="has-site-navigation"><div class="articles-and-sidebar">'
+            b'<header><a href="/about-our-company-and-team/">About</a></header>' + cards +
+            b'<p><a href="/blog/why-we-moved-our-servers-to-the-moon">Why we moved our servers to the moon</a></p>'
+            b'<div class="sidebar"><h3><a href="/blog/most-read-1/">Most read</a></h3></div>'
+            b'</div></body>')
+    page = Page(SITE + "/blog/", SITE + "/blog/", 200, "text/html", body)
+    posts, _ = listing_links(page, parse_html(page)[1], "/blog/", set())
+    assert posts == [SITE + f"/blog/post-{i}/" for i in range(4)] + [SITE + "/blog/why-we-moved-our-servers-to-the-moon"]
+
+
 def test_pagination_and_post_urls():
     for listing, nxt in [("https://vnexpress.net/du-lich", "https://vnexpress.net/du-lich-p2"),
                          ("https://dantri.com.vn/the-gioi.htm", "https://dantri.com.vn/the-gioi/trang-2.htm"),
@@ -357,3 +375,25 @@ async def test_rerun_replaces_pages(api, pool, tmp_path):  # noqa: F811
     assert not stale.exists() and all((tmp_path / p["file_path"]).exists() for p in detail["pages"])
     assert len((await h.get("/api/archive/jobs")).json()) == 1
     assert (await h.post("/api/archive/jobs/999/rerun")).status_code == 404
+
+
+async def test_no_posts_found_is_reported(pool, tmp_path):
+    def handler(req):
+        if req.url.path == "/empty/":
+            return httpx.Response(200, content=b"<title>Empty</title><div id=app></div><script>render()</script>",
+                                  headers={"content-type": "text/html"})
+        return site_handler(req)
+
+    arch = _archiver(pool, tmp_path, handler)
+    job = await arch.start(SITE, [{"prefix": "/empty/", "url": SITE + "/empty/"}], max_pages=5)
+    await arch._tasks[job["id"]]
+    row = await pool.fetchrow("SELECT status, error FROM web_archive_jobs WHERE id = $1", job["id"])
+    assert row["status"] == "failed" and row["error"].startswith("no posts found")
+
+
+async def test_discover_js_only_site(tmp_path):
+    body = b'<html><body><script>document.cookie="x=1";window.location.reload(true);</script></body></html>'
+    arch = WebArchiver(None, tmp_path, check_host=_public, client_factory=lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, content=body, headers={"content-type": "text/html"}))))
+    with pytest.raises(ArchiveError, match="JavaScript"):
+        await arch.discover(SITE)
