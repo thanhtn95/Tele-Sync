@@ -1,4 +1,4 @@
-"""Archive a website: read its navbar, then save every page of the menu items picked.
+"""Archive a website: read its navbar, then save the posts listed under the menu items picked.
 
 Pages land in MEDIA_DIR/web/job<id>/ (served by nginx under /files/web/), with the
 stylesheets, fonts and images they use in job<id>/assets/, so a saved page looks like the
@@ -171,33 +171,50 @@ class Link:
     text: str
     in_nav: bool  # inside a menu / header
     in_footer: bool = False
+    in_heading: bool = False  # inside <h1>-<h4>: how listing pages link their posts
+    in_article: bool = False  # inside <article>
+    in_aside: bool = False  # sidebar (<aside>, *sidebar*): "most read" boxes and the like
+
+
+_HEADINGS = {"h1", "h2", "h3", "h4"}
+_VOID = {"br", "img", "input", "meta", "link", "hr", "source", "wbr", "area", "col", "embed"}
 
 
 class _LinkParser(HTMLParser):
+    """Title, links (with the context they sit in) and <link rel=next> of a page."""
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.links: list[tuple[str, list[str], bool]] = []
+        self.links: list[tuple[str, list[str], dict]] = []
         self.title: list[str] = []
+        self.next: str | None = None
         self._in_title = False
-        self._stack: list[tuple[str, bool, bool]] = []  # open elements: (tag, nav/menu?, footer?)
-        self._nav_depth = self._footer_depth = 0
-        self._a: tuple[str, list[str], bool, bool] | None = None
+        self._stack: list[tuple[str, dict]] = []  # open elements and the contexts they opened
+        self._depth = {"nav": 0, "footer": 0, "heading": 0, "article": 0, "aside": 0}
+        self._a: tuple[str, list[str], dict] | None = None
 
     def handle_starttag(self, tag, attrs):
-        a = dict(attrs)
+        a = {k: v or "" for k, v in attrs}
         if tag == "title":
             self._in_title = True
+        if tag == "link" and "next" in a.get("rel", "").lower().split() and a.get("href"):
+            self.next = self.next or a["href"]
         if tag == "a" and a.get("href"):
-            self._a = (a["href"], [], self._nav_depth > 0, self._footer_depth > 0)
+            self._a = (a["href"], [], {k: v > 0 for k, v in self._depth.items()})
             return
-        if tag in ("br", "img", "input", "meta", "link", "hr", "source", "wbr", "area", "col", "embed"):
+        if tag in _VOID:
             return
-        is_nav = tag in ("nav", "header") or a.get("role") == "navigation" or bool(
-            NAV_HINT.search((a.get("class") or "") + " " + (a.get("id") or "")))
-        is_footer = tag == "footer" or "footer" in (a.get("class") or "") + " " + (a.get("id") or "")
-        self._stack.append((tag, is_nav, is_footer))
-        self._nav_depth += is_nav
-        self._footer_depth += is_footer
+        hint = f"{a.get('class', '')} {a.get('id', '')}"
+        opened = {
+            "nav": tag in ("nav", "header") or a.get("role") == "navigation" or bool(NAV_HINT.search(hint)),
+            "footer": tag == "footer" or "footer" in hint,
+            "heading": tag in _HEADINGS,
+            "article": tag == "article",
+            "aside": tag == "aside" or "sidebar" in hint.lower(),
+        }
+        self._stack.append((tag, opened))
+        for k, v in opened.items():
+            self._depth[k] += v
 
     def handle_endtag(self, tag):
         if tag == "title":
@@ -208,11 +225,11 @@ class _LinkParser(HTMLParser):
             self._a = None
             return
         # Close up to the matching tag: <li>/<p> are often left open in real pages.
-        if any(t == tag for t, _, _ in self._stack):
+        if any(t == tag for t, _ in self._stack):
             while self._stack:
-                t, is_nav, is_footer = self._stack.pop()
-                self._nav_depth -= is_nav
-                self._footer_depth -= is_footer
+                t, opened = self._stack.pop()
+                for k, v in opened.items():
+                    self._depth[k] -= v
                 if t == tag:
                     break
 
@@ -223,22 +240,28 @@ class _LinkParser(HTMLParser):
             self._a[1].append(data)
 
 
-def parse_html(page: Page) -> tuple[str | None, list[Link]]:
-    """Title and absolute links (fragments dropped) of an HTML page."""
+def _parse(page: Page) -> _LinkParser:
     p = _LinkParser()
     try:
         p.feed(page.body.decode(page_charset(page), errors="replace"))
         p.close()
     except Exception:  # broken markup: keep what was parsed
         pass
+    return p
+
+
+def parse_html(page: Page) -> tuple[str | None, list[Link]]:
+    """Title and absolute links (fragments dropped) of an HTML page."""
+    p = _parse(page)
     links = []
-    for href, text, in_nav, in_footer in p.links:
+    for href, text, ctx in p.links:
         href = href.strip()
         if href.startswith(("mailto:", "tel:", "javascript:", "#")):
             continue
         url = urldefrag(urljoin(page.final_url, href))[0]
         if urlsplit(url).scheme in ("http", "https"):
-            links.append(Link(url, " ".join(" ".join(text).split())[:120], in_nav, in_footer))
+            links.append(Link(url, " ".join(" ".join(text).split())[:120], ctx["nav"], ctx["footer"],
+                              ctx["heading"], ctx["article"], ctx["aside"]))
     title = " ".join(" ".join(p.title).split())[:300] or None
     return title, links
 
@@ -391,11 +414,68 @@ def in_category(url: str, prefix: str) -> bool:
     return path.startswith(prefix)
 
 
-def is_article(link: Link) -> bool:
-    """A content link (not menu, header or footer; not the home page or a file)."""
-    path = urlsplit(link.url).path
-    return (not link.in_nav and not link.in_footer and path.strip("/") != ""
-            and Path(path).suffix.lower() not in SKIP_EXT)
+_PAGINATION = re.compile(
+    r"(?:[?&](?:page|paged|p|pg|trang)=(\d+))"            # ?page=2
+    r"|(?:/(?:page|trang|p)[/-]?(\d+)/?(?:\.\w+)?$)"     # /page/2/, /trang-2.htm, /p2
+    r"|(?:-(?:p|page|trang)-?(\d+)(?:\.\w+)?$)",           # /du-lich-p2
+    re.I,
+)
+_POST_PATH = re.compile(r"/\d{4}/\d{1,2}/")  # /2026/10/09/slug
+_LONG_NUMBER = re.compile(r"\d{5,}")         # -5124736.html, -20261010075618440.htm
+MAX_LISTING_PAGES = 100  # next pages followed per menu item at most
+IN_PREFIX_SHARE = 0.6  # when most of a listing's posts live under its path, keep only those
+
+
+def _listing_key(url: str) -> str:
+    """A listing's identity without pagination or page extension: /du-lich-p2 → /du-lich."""
+    parts = urlsplit(url)
+    path = parts.path
+    m = _PAGINATION.search(path)
+    if m:
+        path = path[: m.start()]
+    if Path(path).suffix.lower() in PAGE_EXT:
+        path = path[: -len(Path(path).suffix)]
+    return f"{_site(parts.hostname)}{path.rstrip('/')}"
+
+
+def is_pagination(url: str, listing_url: str) -> bool:
+    """Another page (2, 3…) of the same listing."""
+    parts = urlsplit(url)
+    return bool(_PAGINATION.search(parts.path + ("?" + parts.query if parts.query else ""))) and (
+        _listing_key(url) == _listing_key(listing_url))
+
+
+def looks_like_post(url: str) -> bool:
+    """Post-style address: a date path, a long id, or a long slug."""
+    path = urlsplit(url).path
+    last = Path(path.rstrip("/")).stem
+    return bool(_POST_PATH.search(path) or _LONG_NUMBER.search(last) or last.count("-") >= 3)
+
+
+def listing_links(page: Page, links: list[Link], prefix: str, listings: set[str]) -> tuple[list[str], list[str]]:
+    """(posts, next pages) linked from a listing page. Posts are content links (not menus,
+    header, footer or sidebar) that sit in a headline or <article> or have a post-style address."""
+    me = _listing_key(page.final_url)
+    posts, pages = [], []
+    for link in links:
+        url, path = link.url, urlsplit(link.url).path
+        if not same_site(url, page.final_url) or Path(path).suffix.lower() in SKIP_EXT or not path.strip("/"):
+            continue
+        if is_pagination(url, page.final_url):
+            pages.append(url)
+            continue
+        if link.in_nav or link.in_footer or link.in_aside:
+            continue
+        key = _listing_key(url)
+        if key == me or key in listings:
+            continue  # the listing itself, or another picked menu item
+        if link.in_heading or link.in_article or looks_like_post(url):
+            posts.append(url)
+    posts = list(dict.fromkeys(posts))
+    inside = [u for u in posts if in_category(u, prefix)]
+    if len(inside) >= 3 and len(inside) >= IN_PREFIX_SHARE * len(posts):
+        posts = inside  # e.g. Dân Trí: /the-gioi/…htm posts, plus a few from elsewhere
+    return posts, list(dict.fromkeys(pages))
 
 
 def find_categories(page: Page) -> tuple[str | None, list[dict]]:
@@ -777,7 +857,8 @@ class WebArchiver:
                                 for c in cats]}] if cats else []
         return {"url": page.final_url, "title": title, "menus": menus}
 
-    async def start(self, url: str, categories: list[dict], max_pages: int, save_images: bool = True) -> dict:
+    async def start(self, url: str, categories: list[dict], max_pages: int, save_images: bool = True,
+                    title: str | None = None) -> dict:
         url = normalize_url(url)
         cats = []
         for c in categories:
@@ -788,9 +869,9 @@ class WebArchiver:
         if not cats:
             raise ArchiveError("pick at least one category")
         row = await self.pool.fetchrow(
-            f"INSERT INTO web_archive_jobs (url, categories, max_pages, save_images) VALUES ($1, $2, $3, $4) "
-            f"RETURNING {JOB_COLS}",
-            url, cats, max_pages, save_images,
+            f"INSERT INTO web_archive_jobs (url, categories, max_pages, save_images, title) "
+            f"VALUES ($1, $2, $3, $4, $5) RETURNING {JOB_COLS}",
+            url, cats, max_pages, save_images, (title or "")[:300] or None,
         )
         self._tasks[row["id"]] = asyncio.create_task(self._run(row["id"]), name=f"web-archive-{row['id']}")
         return dict(row)
@@ -884,26 +965,26 @@ class WebArchiver:
         cats = job["categories"]
         folder = self.media_dir / "web" / f"job{job_id}"
         folder.mkdir(parents=True, exist_ok=True)
-        # Per category: articles waiting to be saved, and its listing pages (followed on).
-        # Articles go first and categories take turns, so a small max_pages still gets
-        # stories from every picked category rather than only sub-section pages.
-        articles = {c["prefix"]: deque() for c in cats}
+        # Each picked menu item's listing pages (its page, then page 2, 3…) are read only to
+        # find posts; only posts are saved and counted. Posts found go first and items take
+        # turns, so a small limit still gets posts from every picked item.
+        posts = {c["prefix"]: deque() for c in cats}
         listings = {c["prefix"]: deque([c["url"]]) for c in cats}
+        listing_reads = dict.fromkeys(posts, 0)
+        listing_keys = {_listing_key(c["url"]) for c in cats}
         order = deque(c["prefix"] for c in cats)
-        pending: deque[tuple[str, str | None, bool]] = deque([(job["url"], None, True)])  # home page first
-        seen = {job["url"], *(c["url"] for c in cats)}
+        seen = {c["url"] for c in cats}
         fetched: set[str] = set()
-        saved = 0
+        saved = requests = 0
 
         def next_url():
-            if pending:
-                return pending.popleft()
             for _ in range(len(order)):
                 prefix = order[0]
                 order.rotate(-1)
-                if articles[prefix]:
-                    return articles[prefix].popleft(), prefix, False
-                if listings[prefix]:
+                if posts[prefix]:
+                    return posts[prefix].popleft(), prefix, False
+                if listings[prefix] and listing_reads[prefix] < MAX_LISTING_PAGES:
+                    listing_reads[prefix] += 1
                     return listings[prefix].popleft(), prefix, True
             return None
 
@@ -911,38 +992,44 @@ class WebArchiver:
             assets = AssetStore(folder / ASSETS_DIR, client, self.check_host, self._disk_low, job["save_images"])
             robots = await self._robots(client, job["url"])
             while saved < job["max_pages"] and (item := next_url()):
-                url, prefix, expand = item
+                url, prefix, is_listing = item
                 if robots and not robots.can_fetch(ROBOTS_AGENT, url):
-                    await self._record(job_id, url, prefix, error="blocked by robots.txt")
+                    if not is_listing:
+                        await self._record(job_id, url, prefix, error="blocked by robots.txt")
                     continue
                 if self._disk_low():
                     raise ArchiveError("disk almost full: stopped")
-                if saved:
+                if requests:
                     await asyncio.sleep(self.delay)
+                requests += 1
                 try:
                     page = await fetch_page(client, url, check_host=self.check_host)
                 except ArchiveError as e:
-                    await self._record(job_id, url, prefix, error=str(e))
+                    if not is_listing:
+                        await self._record(job_id, url, prefix, error=str(e))
                     continue
-                if page.final_url in fetched:  # e.g. /sport redirected to /sport/, already saved
+                if page.final_url in fetched:  # e.g. redirected to a page already read
                     continue
                 fetched.add(page.final_url)
-                title = None
-                if page.is_html:
-                    title, links = parse_html(page)
-                    for link in links if expand else ():
-                        if link.url in seen or not same_site(link.url, job["url"]):
-                            continue
-                        hit = next((c["prefix"] for c in cats if in_category(link.url, c["prefix"])), None)
-                        if hit and Path(urlsplit(link.url).path).suffix.lower() not in SKIP_EXT:
-                            # more of a picked category (sub-pages, page 2…): follow its links too
-                            seen.add(link.url)
-                            listings[hit].append(link.url)
-                        elif prefix and is_article(link):
-                            # listed on a category page but stored elsewhere (news sites often keep
-                            # articles at /story-123.html): save it, don't crawl on from it
-                            seen.add(link.url)
-                            articles[prefix].append(link.url)
+
+                if is_listing:
+                    if page.is_html:
+                        _, links = parse_html(page)
+                        found, more = listing_links(page, links, prefix, listing_keys)
+                        new = [u for u in found if u not in seen]
+                        seen.update(new)
+                        posts[prefix].extend(new)
+                        nxt = _parse(page).next
+                        if nxt:
+                            more.append(urldefrag(urljoin(page.final_url, nxt))[0])
+                        if new:  # stop paging once a page brings nothing new
+                            for u in more:
+                                if u not in seen and is_pagination(u, page.final_url):
+                                    seen.add(u)
+                                    listings[prefix].append(u)
+                    continue
+
+                title = parse_html(page)[0] if page.is_html else None
                 name = file_name(page.final_url, page.content_type)
                 body = page.body
                 if page.is_html:
@@ -958,8 +1045,6 @@ class WebArchiver:
                 await asyncio.to_thread((folder / name).write_bytes, body)
                 await self._record(job_id, url, prefix, page=page, title=title, size=len(body),
                                    file_path=f"web/job{job_id}/{name}")
-                if prefix is None and title:
-                    await self.pool.execute("UPDATE web_archive_jobs SET title = $2 WHERE id = $1", job_id, title)
                 saved += 1
 
     async def _robots(self, client: httpx.AsyncClient, url: str) -> RobotFileParser | None:

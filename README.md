@@ -76,13 +76,15 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
   imported by a sync pass doesn't count as unread.
 * **Website archive** (🗄 *Websites* on the chat list, `#/archive`): enter a site's address and
   *Read menu* shows the site's own navbar (its `<nav>` menus, sub-menus indented as on the
-  site; ticking an item ticks its sub-items). Tick what you want, set a page limit, and a
-  background job saves the home page plus each picked item's pages to `MEDIA_DIR/web/job<id>/`:
-  the item's listing pages (sub-sections, page 2…, e.g. everything under `/xa-hoi/` for
-  `/xa-hoi.htm`) are followed, and the articles they list are saved even when they live
-  elsewhere on the site (`/story-123.html`). Articles come before more listing pages and items
-  take turns, so a small limit still covers each one.
-  **Pages keep their look**: stylesheets (with their `@import`s, fonts and background images),
+  site; ticking an item ticks its sub-items). Tick what you want, set a post limit, and a
+  background job saves the **posts** listed under each picked item to `MEDIA_DIR/web/job<id>/`.
+  The item's own page and its next pages (`-p2`, `/trang-2.htm`, `/page/2/`, `?page=2`,
+  `<link rel=next>`) are only read to find posts, never saved; paging stops once a page lists
+  nothing new. Posts are the content links of those pages (in a headline or `<article>`, or
+  with a post-style address: a date path, a long id, a long slug), not menus, header, footer
+  or sidebar; when most of them live under the item's path (`/the-gioi/…`) only those are
+  kept. Items take turns, so a small limit still gets posts from each.
+  **Posts keep their look**: stylesheets (with their `@import`s, fonts and background images),
   icons and images (optional) are saved once per job in `job<id>/assets/` and the page points
   at them, so it displays like the original even after the site changes. Scripts, event
   handlers and script hints are removed and lazy images made to load (pages are shown
@@ -125,7 +127,7 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
 | POST | `/api/chats/{chat_id}/sync` | sync one chat now (409 if its sync is off) |
 | POST | `/api/media/retry-failed` | retry failed media in every chat |
 | POST | `/api/archive/discover` `{url}` | the site's navbar `{menus: [{name, items: [{label, url, prefix, depth}]}]}` |
-| POST / GET | `/api/archive/jobs` `{url, categories, max_pages, save_images}` | start archiving picked menu items / list jobs |
+| POST / GET | `/api/archive/jobs` `{url, categories, max_pages, save_images, title?}` | archive the posts of picked menu items (`max_pages` posts) / list jobs |
 | GET / DELETE | `/api/archive/jobs/{id}` | a job with its pages / delete it and its files |
 | POST | `/api/archive/jobs/{id}/cancel` | stop a running job |
 | POST | `/api/archive/jobs/{id}/rerun` | archive the job's site again, replacing its pages (409 while running) |
