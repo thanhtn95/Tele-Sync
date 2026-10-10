@@ -718,7 +718,8 @@ async def archive_job(job_id: int, pool=Depends(pool_dep)):
     if job is None:
         raise HTTPException(404, "archive not found")
     pages = await pool.fetch(
-        "SELECT id, url, final_url, category, status, content_type, title, size, file_path, error, archived_at "
+        "SELECT id, url, final_url, category, status, content_type, title, size, file_path, error, archived_at, "
+        "thumb_path "
         "FROM web_archive_pages WHERE job_id = $1 ORDER BY id",
         job_id,
     )

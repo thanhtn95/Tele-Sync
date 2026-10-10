@@ -177,6 +177,7 @@ class Link:
     in_article: bool = False  # inside <article>
     in_aside: bool = False  # sidebar (<aside>, *sidebar*): "most read" boxes and the like
     in_header: bool = False  # <header>: the site's header, or a post card's (inside <article>)
+    image: str | None = None  # the picture inside the link (a list page's post thumbnail)
 
 
 _HEADINGS = {"h1", "h2", "h3", "h4"}
@@ -189,12 +190,25 @@ _VOID = {"br", "img", "input", "meta", "link", "hr", "source", "wbr", "area", "c
 HINT_MAX_SHARE = 0.5
 
 
+def _img_src(a: dict) -> str | None:
+    """The real picture of an <img>/<source>: lazy data-src first, then src, then a srcset candidate."""
+    for key in ("data-src", "data-original", "data-lazy-src", "data-lazy", "src"):
+        v = (a.get(key) or "").strip()
+        if _is_fetchable(v):
+            return v
+    for key in ("data-srcset", "srcset"):
+        best = _srcset_best(a.get(key) or "")
+        if _is_fetchable(best):
+            return best
+    return None
+
+
 class _LinkParser(HTMLParser):
     """Title, links (with the context they sit in) and <link rel=next> of a page."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.links: list[tuple[str, list[str], dict, tuple[int, ...]]] = []
+        self.links: list[list] = []  # [href, text parts, contexts, hint ids, image]
         self.title: list[str] = []
         self.next: str | None = None
         self._in_title = False
@@ -203,7 +217,7 @@ class _LinkParser(HTMLParser):
         self._depth = {"nav": 0, "header": 0, "footer": 0, "heading": 0, "article": 0, "aside": 0}
         self.hints: list[dict] = []  # {"kinds": set, "links": n}
         self._open_hints: list[int] = []
-        self._a: tuple[str, list[str], dict, tuple[int, ...]] | None = None
+        self._a: list | None = None
 
     def handle_starttag(self, tag, attrs):
         a = {k: v or "" for k, v in attrs}
@@ -214,8 +228,10 @@ class _LinkParser(HTMLParser):
         if tag == "a" and a.get("href"):
             for i in self._open_hints:
                 self.hints[i]["links"] += 1
-            self._a = (a["href"], [], {k: v > 0 for k, v in self._depth.items()}, tuple(self._open_hints))
+            self._a = [a["href"], [], {k: v > 0 for k, v in self._depth.items()}, tuple(self._open_hints), None]
             return
+        if self._a is not None and self._a[4] is None and tag in ("img", "source"):
+            self._a[4] = _img_src(a)
         if tag in _VOID:
             return
         opened = {
@@ -288,7 +304,7 @@ def parse_html(page: Page) -> tuple[str | None, list[Link]]:
     """Title and absolute links (fragments dropped) of an HTML page."""
     p = _parse(page)
     links = []
-    for href, text, raw_ctx, hint_ids in p.links:
+    for href, text, raw_ctx, hint_ids, image in p.links:
         ctx = p.contexts(raw_ctx, hint_ids)
         href = href.strip()
         if href.startswith(("mailto:", "tel:", "javascript:", "#")):
@@ -296,7 +312,8 @@ def parse_html(page: Page) -> tuple[str | None, list[Link]]:
         url = urldefrag(urljoin(page.final_url, href))[0]
         if urlsplit(url).scheme in ("http", "https"):
             links.append(Link(url, " ".join(" ".join(text).split())[:120], ctx["nav"], ctx["footer"],
-                              ctx["heading"], ctx["article"], ctx["aside"], ctx["header"]))
+                              ctx["heading"], ctx["article"], ctx["aside"], ctx["header"],
+                              urljoin(page.final_url, image) if image else None))
     title = " ".join(" ".join(p.title).split())[:300] or None
     return title, links
 
@@ -521,6 +538,28 @@ def listing_links(page: Page, links: list[Link], prefix: str, listings: set[str]
     if len(inside) >= 3 and len(inside) >= IN_PREFIX_SHARE * len(posts):
         posts = inside  # e.g. Dân Trí: /the-gioi/…htm posts, plus a few from elsewhere
     return posts, list(dict.fromkeys(pages))
+
+
+def post_thumbnails(links: list[Link]) -> dict[str, str]:
+    """Post URL → the thumbnail a list page shows for it (the picture inside a link to it)."""
+    thumbs: dict[str, str] = {}
+    for link in links:
+        if link.image and link.url not in thumbs and _is_fetchable(link.image):
+            thumbs[link.url] = link.image
+    return thumbs
+
+
+_SHARE_IMAGE = re.compile(r"""<meta\b[^>]*(?:property|name)\s*=\s*["'](?:og:image|twitter:image)(?::src)?["'][^>]*>""", re.I)
+
+
+def share_image(page: Page) -> str | None:
+    """The page's own share picture (og:image / twitter:image), used when a list had no thumbnail."""
+    text = page.body[:300_000].decode(page_charset(page), errors="replace")
+    for m in _SHARE_IMAGE.finditer(text):
+        v = _attr_value(_attr(m.group(0), "content"))
+        if _is_fetchable(v):
+            return urljoin(page.final_url, v)
+    return None
 
 
 def find_categories(page: Page) -> tuple[str | None, list[dict]]:
@@ -1051,6 +1090,7 @@ class WebArchiver:
         listings = {c["prefix"]: deque([c["url"]]) for c in cats}
         listing_reads = dict.fromkeys(posts, 0)
         posts_found = dict.fromkeys(posts, 0)
+        thumbs: dict[str, str] = {}  # post URL → its thumbnail on the list page
         listing_keys = {_listing_key(c["url"]) for c in cats}
         order = deque(c["prefix"] for c in cats)
         seen = {c["url"] for c in cats}
@@ -1097,6 +1137,8 @@ class WebArchiver:
                     if page.is_html:
                         _, links = parse_html(page)
                         found, more = listing_links(page, links, prefix, listing_keys)
+                        for u, img in post_thumbnails(links).items():
+                            thumbs.setdefault(u, img)
                         new = [u for u in found if u not in seen]
                         seen.update(new)
                         posts[prefix].extend(new)
@@ -1125,8 +1167,10 @@ class WebArchiver:
                         "assets_bytes = assets_bytes + $3 WHERE id = $1",
                         job_id, assets.count - before[0], assets.bytes - before[1])
                 await asyncio.to_thread((folder / name).write_bytes, body)
+                thumb = await self._save_thumb(assets, job_id, thumbs.get(url) or (
+                    share_image(page) if page.is_html else None))
                 await self._record(job_id, url, prefix, page=page, title=title, size=len(body),
-                                   file_path=f"web/job{job_id}/{name}")
+                                   file_path=f"web/job{job_id}/{name}", thumb_path=thumb)
                 saved += 1
         if not saved and not any(posts_found.values()):
             raise ArchiveError("no posts found on the picked menu items' pages (the site may build its "
@@ -1173,6 +1217,22 @@ class WebArchiver:
                 except Exception:
                     log.exception("icon for web archive job %s failed", r["id"])
 
+    async def _save_thumb(self, assets: AssetStore, job_id: int, image_url: str | None) -> str | None:
+        """Save a post's thumbnail with the job's assets (also when page images are off: it's
+        one small picture per post, for the archive's list). Returns its path under MEDIA_DIR."""
+        if not image_url:
+            return None
+        before = (assets.count, assets.bytes)
+        await assets.get_all([(image_url, "file")])
+        name = assets.saved.get(image_url)
+        if assets.count != before[0]:
+            await self.pool.execute(
+                "UPDATE web_archive_jobs SET assets_saved = assets_saved + $2, assets_bytes = assets_bytes + $3 "
+                "WHERE id = $1", job_id, assets.count - before[0], assets.bytes - before[1])
+        if not name or Path(name).suffix not in ICON_TYPES:
+            return None
+        return f"web/job{job_id}/{ASSETS_DIR}/{name}"
+
     async def _robots(self, client: httpx.AsyncClient, url: str) -> RobotFileParser | None:
         try:
             page = await fetch_page(client, urljoin(url, "/robots.txt"), max_bytes=512 * 1024,
@@ -1185,16 +1245,16 @@ class WebArchiver:
 
     async def _record(self, job_id: int, url: str, prefix: str | None, *, page: Page | None = None,
                       title: str | None = None, size: int | None = None, file_path: str | None = None,
-                      error: str | None = None) -> None:
+                      thumb_path: str | None = None, error: str | None = None) -> None:
         async with self.pool.acquire() as conn, conn.transaction():
             await conn.execute(
                 """
                 INSERT INTO web_archive_pages (job_id, url, final_url, category, status, content_type,
-                                               title, size, file_path, error)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                                               title, size, file_path, error, thumb_path)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 """,
                 job_id, url, page.final_url if page else url, prefix, page.status if page else None,
-                page.content_type if page else None, title, size, file_path, error,
+                page.content_type if page else None, title, size, file_path, error, thumb_path,
             )
             col = "pages_failed" if error else "pages_saved"
             await conn.execute(f"UPDATE web_archive_jobs SET {col} = {col} + 1, "

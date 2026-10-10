@@ -329,6 +329,20 @@ function JobList() {
   );
 }
 
+/** A post's thumbnail as the site's list page showed it; opens the saved post. */
+function PostThumb({ page }) {
+  const [broken, setBroken] = useState(false);
+  if (broken) return <span className="post-thumb" aria-hidden="true" />;
+  const img = <img src={fileUrl(page.thumb_path)} alt="" loading="lazy" onError={() => setBroken(true)} />;
+  return page.file_path ? (
+    <a className="post-thumb" href={fileUrl(page.file_path)} target="_blank" rel="noreferrer noopener" tabIndex={-1}>
+      {img}
+    </a>
+  ) : (
+    <span className="post-thumb">{img}</span>
+  );
+}
+
 function JobDetail({ jobId }) {
   const [job, setJob] = useState(null);
   const [error, setError] = useState(null);
@@ -375,17 +389,20 @@ function JobDetail({ jobId }) {
           </h2>
           <ul className="archive-pages">
             {g.pages.map((p) => (
-              <li key={p.id}>
-                {p.file_path ? (
-                  <a href={fileUrl(p.file_path)} target="_blank" rel="noreferrer noopener">
-                    {p.title || p.final_url}
-                  </a>
-                ) : (
-                  <span className="muted">{p.url}</span>
-                )}
-                <span className={`small ${p.error ? 'err' : 'muted'}`}>
-                  {p.error || new URL(p.final_url).pathname}
-                </span>
+              <li key={p.id} className={p.thumb_path ? 'has-thumb' : undefined}>
+                {p.thumb_path && <PostThumb page={p} />}
+                <div className="archive-page-text">
+                  {p.file_path ? (
+                    <a href={fileUrl(p.file_path)} target="_blank" rel="noreferrer noopener">
+                      {p.title || p.final_url}
+                    </a>
+                  ) : (
+                    <span className="muted">{p.url}</span>
+                  )}
+                  <span className={`small ${p.error ? 'err' : 'muted'}`}>
+                    {p.error || new URL(p.final_url).pathname}
+                  </span>
+                </div>
               </li>
             ))}
           </ul>

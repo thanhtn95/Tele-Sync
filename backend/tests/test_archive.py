@@ -6,7 +6,7 @@ import pytest
 from app import archive
 from app.archive import (ArchiveError, Page, WebArchiver, _listing_key, fetch_page, file_name, find_categories,
                          html_assets, is_pagination, link_pages, listing_links, localize_html, looks_like_post,
-                         parse_html, prepare_html, read_navbar, site_icons)
+                         parse_html, post_thumbnails, prepare_html, read_navbar, share_image, site_icons)
 from app.main import app
 
 from .test_api import api  # noqa: F401  (fixture)
@@ -33,7 +33,8 @@ PAGES = {
     "/robots.txt": b"User-agent: *\nDisallow: /news/secret\n",
     "/news/": b'<title>News</title><header><a href="/sport/">Sport</a></header>'
               b'<h2><a href="/news/a">A</a></h2>'
-              b'<article><a href="/story-7.html">Story 7</a></article>'
+              b'<article><a href="/story-7.html"><img src="data:image/gif;base64,R0" data-src="/img/t7.jpg"></a>'
+              b'<a href="/story-7.html">Story 7</a></article>'
               b'<p><a href="/2026/10/09/big-story">Big</a> <a href="/news/secret-12345">s</a>'
               b' <a href="/sport/">Sport</a> <a href="/news/world.htm">World</a></p>'
               b'<aside><h3><a href="/hot-post-99999">Hot</a></h3></aside>'
@@ -41,7 +42,8 @@ PAGES = {
     "/news/page/2/": b'<title>News 2</title><h2><a href="/news/b">B</a></h2><h2><a href="/news/a">A</a></h2>'
                      b'<a href="/news/page/3/">3</a>',
     "/news/page/3/": b'<title>News 3</title><h2><a href="/news/a">A</a></h2><a href="/news/page/4/">4</a>',
-    "/news/a": b'<html><head><title>A</title><link rel="stylesheet" href="/s.css"></head><body>'
+    "/news/a": b'<html><head><title>A</title><link rel="stylesheet" href="/s.css">'
+               b'<meta property="og:image" content="/img/og-a.png"></head><body>'
                b'<a href="/news/b#top">B</a><img src="../img/a.png"><a href="/sport/x">x</a>'
                b'<script>document.write("ad")</script></body></html>',
     "/news/b": b'<title>B</title><a href="a">A</a>',
@@ -61,6 +63,8 @@ ASSETS = {
     "/img/bg.png": ("image/png", b"\x89PNG bg"),
     "/logo.png": ("image/png", b"\x89PNG logo"),
     "/touch.png": ("image/png", b"\x89PNG touch"),
+    "/img/t7.jpg": ("image/jpeg", b"\xff\xd8 t7"),
+    "/img/og-a.png": ("image/png", b"\x89PNG og-a"),
 }
 
 
@@ -226,6 +230,18 @@ def test_listing_links_real_page_shapes():
     assert posts == [SITE + f"/blog/post-{i}/" for i in range(4)] + [SITE + "/blog/why-we-moved-our-servers-to-the-moon"]
 
 
+def test_thumbnails_and_share_image():
+    body = (b'<a href="/p1"><picture><source data-srcset="/p1-400.jpg 400w, /p1-1600.jpg 1600w">'
+            b'<img src="/p1-small.jpg"></picture></a><a href="/p1">Title one</a>'
+            b'<a href="/p2"><img src="data:image/gif;base64,R0" data-original="/p2.jpg"></a><a href="/p3">no picture</a>')
+    page = Page(SITE + "/list/", SITE + "/list/", 200, "text/html", body)
+    assert post_thumbnails(parse_html(page)[1]) == {SITE + "/p1": SITE + "/p1-400.jpg", SITE + "/p2": SITE + "/p2.jpg"}
+    post = Page(SITE + "/p3", SITE + "/p3", 200, "text/html",
+                b'<meta name="twitter:image" content="https://cdn.test/p3.jpg"><meta property="og:image" content="/p3.png">')
+    assert share_image(post) == "https://cdn.test/p3.jpg"  # first one given
+    assert share_image(Page(SITE, SITE, 200, "text/html", b"<p>none</p>")) is None
+
+
 def test_site_icons_best_first():
     body = (b'<link rel="icon" href="/f16.png" sizes="16x16"><link rel="icon" href="/f.svg" type="image/svg+xml">'
             b'<link rel="icon" href="/f192.png" sizes="192x192"><link rel="shortcut icon" href="/f.ico">'
@@ -280,6 +296,12 @@ async def test_crawl_saves_posts_only(pool, tmp_path):
     assert "/news/page/3/" in requested and "/news/page/4/" not in requested
     assert not {"/hot-post-99999", "/privacy-policy-of-site", "/sport/", "/news/world.htm"} & set(requested)
     assert requested.count("/") == 1  # read once, for the site's icon; not saved
+    # each post's thumbnail: the list page's picture for it, else the post's og:image
+    thumbs = {p["url"].removeprefix(SITE): p["thumb_path"] for p in pages if p["file_path"]}
+    assert (tmp_path / thumbs["/story-7.html"]).read_bytes() == b"\xff\xd8 t7"
+    assert (tmp_path / thumbs["/news/a"]).read_bytes() == b"\x89PNG og-a"
+    assert thumbs["/news/b"] is None and thumbs["/2026/10/09/big-story"] is None
+    assert thumbs["/news/a"].startswith(f"web/job{job['id']}/assets/")
     icon = await pool.fetchval("SELECT icon_path FROM web_archive_jobs WHERE id = $1", job["id"])
     assert icon == f"web/job{job['id']}/icon.png" and (tmp_path / icon).read_bytes() == b"\x89PNG touch"
 
@@ -295,14 +317,15 @@ async def test_crawl_saves_posts_only(pool, tmp_path):
     assert files["/news/a"].startswith(f"web/job{job['id']}/")
     # the post's look is kept: stylesheet, @imported CSS, font, background and image saved locally
     assets = tmp_path / f"web/job{job['id']}/assets"
-    assert sorted(p.name.rsplit(".", 1)[1] for p in assets.iterdir()) == ["css", "css", "png", "png", "woff2"]
+    # (+ the two posts' thumbnails: jpg, png)
+    assert sorted(p.name.rsplit(".", 1)[1] for p in assets.iterdir()) == ["css", "css", "jpg", "png", "png", "png", "woff2"]
     main_css = next(p for p in assets.iterdir() if b"@import" in p.read_bytes()).read_text()
     assert main_css.startswith('@import "') and 'url("' in main_css and "site.test" not in main_css
     assert (assets / main_css.split('"')[1]).read_text().count("url(") == 1
     assert 'href="assets/' in a and 'src="assets/' in a and "<script" not in a
     assert '<meta charset="utf-8">' in a
     row = await pool.fetchrow("SELECT assets_saved, assets_bytes, pages_bytes FROM web_archive_jobs WHERE id = $1", job["id"])
-    assert row["assets_saved"] == 5 and row["assets_bytes"] > 0 and row["pages_bytes"] > 0
+    assert row["assets_saved"] == 7 and row["assets_bytes"] > 0 and row["pages_bytes"] > 0
 
 
 async def test_max_posts_and_cancel(pool, tmp_path):
@@ -356,7 +379,8 @@ async def test_api(api, pool, tmp_path):  # noqa: F811
     folder = tmp_path / "web" / f"job{job_id}"
     assert sorted(p.name.split("_")[0] for p in folder.iterdir() if p.is_file()) == ["icon.png", "news", "story-7"]
     assert jobs[0]["icon_path"] == f"web/job{job_id}/icon.png"
-    assert sorted(p.suffix for p in (folder / "assets").iterdir()) == [".css", ".css", ".woff2"]  # no images
+    # no page images, only the posts' thumbnails (for the archive's list)
+    assert sorted(p.suffix for p in (folder / "assets").iterdir()) == [".css", ".css", ".jpg", ".png", ".woff2"]
 
     assert (await h.delete(f"/api/archive/jobs/{job_id}")).status_code == 200
     assert not folder.exists() and (await h.get(f"/api/archive/jobs/{job_id}")).status_code == 404
