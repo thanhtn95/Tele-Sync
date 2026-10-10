@@ -679,6 +679,7 @@ class ArchiveJobRequest(BaseModel):
     categories: list[ArchiveCategory] = Field(min_length=1, max_length=200)
     max_pages: int = Field(100, ge=1, le=MAX_PAGES_LIMIT)
     save_images: bool = True  # stylesheets and fonts are always kept
+    title: str | None = Field(None, max_length=1000)  # the site's name, from discover
 
 
 @app.post("/api/archive/discover")
@@ -692,11 +693,11 @@ async def archive_discover(body: DiscoverRequest, request: Request):
 
 @app.post("/api/archive/jobs", status_code=202)
 async def archive_start(body: ArchiveJobRequest, request: Request):
-    """Archive the home page plus the pages of the picked menu items, with their CSS/images
-    (in the background)."""
+    """Archive the posts listed under the picked menu items (up to max_pages posts), with their
+    CSS/images (in the background)."""
     try:
         return await request.app.state.archiver.start(
-            body.url, [c.model_dump() for c in body.categories], body.max_pages, body.save_images
+            body.url, [c.model_dump() for c in body.categories], body.max_pages, body.save_images, body.title
         )
     except ArchiveError as e:
         raise HTTPException(400, str(e))
@@ -725,6 +726,18 @@ async def archive_job(job_id: int, pool=Depends(pool_dep)):
 @app.post("/api/archive/jobs/{job_id}/cancel")
 async def archive_cancel(job_id: int, request: Request):
     return {"cancelled": await request.app.state.archiver.cancel(job_id)}
+
+
+@app.post("/api/archive/jobs/{job_id}/rerun", status_code=202)
+async def archive_rerun(job_id: int, request: Request):
+    """Archive the job's site again (same menu items and settings), replacing its saved pages."""
+    try:
+        job = await request.app.state.archiver.rerun(job_id)
+    except ArchiveError as e:
+        raise HTTPException(409, str(e))
+    if job is None:
+        raise HTTPException(404, "archive not found")
+    return job
 
 
 @app.delete("/api/archive/jobs/{job_id}")

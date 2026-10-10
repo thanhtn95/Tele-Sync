@@ -136,7 +136,7 @@ function NewArchive({ onStarted }) {
       const cats = allItems
         .filter((it) => picked.has(it.url) && !seen.has(it.url) && seen.add(it.url))
         .map(({ prefix, label, url: u }) => ({ prefix, label, url: u }));
-      const job = await api.archiveStart(site.url, cats, Number(maxPages) || 100, images);
+      const job = await api.archiveStart(site.url, cats, Number(maxPages) || 100, images, site.title);
       setSite(null);
       setUrl('');
       onStarted(job);
@@ -177,7 +177,9 @@ function NewArchive({ onStarted }) {
             <p className="muted small">No menu found on this page. Try the address of a section instead.</p>
           ) : (
             <>
-              <p className="muted small">Tick what to archive from the site's menu (an item includes its sub-items).</p>
+              <p className="muted small">
+                Tick the menu items whose posts you want (an item includes its sub-items).
+              </p>
               {allItems.length > 12 && (
                 <input
                   type="search"
@@ -207,17 +209,18 @@ function NewArchive({ onStarted }) {
                 max="2000"
                 value={maxPages}
                 onChange={(e) => setMaxPages(e.target.value)}
-                aria-label="Maximum pages"
+                aria-label="Maximum posts"
               />{' '}
-              pages
+              posts
             </label>
             <button className="primary" disabled={busy || picked.size === 0} onClick={start}>
               Archive {picked.size} item{picked.size === 1 ? '' : 's'}
             </button>
           </div>
           <p className="muted small">
-            Saves the home page and the pages of each picked item, with their look (CSS, fonts
-            {images ? ', images' : ''}), one page per second, skipping what the site's robots.txt disallows.
+            Reads each picked item's list of posts (and its next pages) and saves the posts themselves, with
+            their look (CSS, fonts{images ? ', images' : ''}). One page per second; what the site's robots.txt
+            disallows is skipped.
           </p>
         </div>
       )}
@@ -225,8 +228,27 @@ function NewArchive({ onStarted }) {
   );
 }
 
+/** Ask, then archive the job's site again with the same menu items (old pages are replaced). */
+async function rerunJob(job) {
+  const ok = window.confirm(
+    `Archive ${host(job.url)} again with the same menu items?\n\n` +
+      `The ${job.pages_saved} saved pages are replaced by the posts listed there now (with their CSS and images).`,
+  );
+  if (!ok) return false;
+  try {
+    await api.archiveRerun(job.id);
+    return true;
+  } catch (e) {
+    window.alert(e.message);
+    return false;
+  }
+}
+
 function JobRow({ job, onChanged }) {
   const active = ACTIVE.has(job.status);
+  const rerun = async () => {
+    if (await rerunJob(job)) onChanged();
+  };
   const cancel = async () => {
     await api.archiveCancel(job.id).catch(() => {});
     onChanged();
@@ -244,7 +266,7 @@ function JobRow({ job, onChanged }) {
           {job.categories.map((c) => c.label).join(', ')}
         </span>
         <span className={`small ${job.status === 'failed' ? 'err' : 'muted'}`}>
-          {STATUS[job.status] || job.status} · {job.pages_saved} saved
+          {STATUS[job.status] || job.status} · {job.pages_saved} post{job.pages_saved === 1 ? '' : 's'}
           {job.pages_bytes + job.assets_bytes > 0 ? ` · ${formatSize(job.pages_bytes + job.assets_bytes)}` : ''}
           {job.pages_failed ? ` · ${job.pages_failed} failed` : ''} · {formatAgo(job.created_at)}
           {job.error ? ` · ${job.error}` : ''}
@@ -253,9 +275,14 @@ function JobRow({ job, onChanged }) {
       {active ? (
         <button onClick={cancel}>Stop</button>
       ) : (
-        <button className="icon-btn" onClick={remove} title="Delete this archive">
-          🗑
-        </button>
+        <>
+          <button onClick={rerun} title="Archive this site again with the same menu items">
+            ↻ Re-archive
+          </button>
+          <button className="icon-btn" onClick={remove} title="Delete this archive">
+            🗑
+          </button>
+        </>
       )}
     </li>
   );
@@ -299,10 +326,10 @@ function JobDetail({ jobId }) {
   if (error) return <div className="err small">{error}</div>;
   if (!job) return <p className="muted small">Loading…</p>;
 
-  const groups = [{ prefix: null, label: 'Home page' }, ...job.categories].map((c) => ({
-    ...c,
-    pages: job.pages.filter((p) => p.category === c.prefix),
-  }));
+  // Archives made before only posts were kept also have a home page.
+  const groups = [{ prefix: null, label: 'Home page' }, ...job.categories]
+    .map((c) => ({ ...c, pages: job.pages.filter((p) => p.category === c.prefix) }))
+    .filter((g) => g.prefix !== null || g.pages.length > 0);
   return (
     <>
       <div className="archive-pick-head">
@@ -311,13 +338,17 @@ function JobDetail({ jobId }) {
           {job.url}
         </a>
         <span className={`small ${job.status === 'failed' ? 'err' : 'muted'}`}>
-          {STATUS[job.status] || job.status} · {job.pages_saved} saved
+          {STATUS[job.status] || job.status} · {job.pages_saved} post{job.pages_saved === 1 ? '' : 's'}
           {job.pages_bytes + job.assets_bytes > 0 ? ` · ${formatSize(job.pages_bytes + job.assets_bytes)}` : ''}
-          {job.pages_failed ? ` · ${job.pages_failed} failed` : ''} · up to {job.max_pages} pages
+          {job.pages_failed ? ` · ${job.pages_failed} failed` : ''} · up to {job.max_pages} posts
           {job.error ? ` · ${job.error}` : ''}
         </span>
-        {ACTIVE.has(job.status) && (
+        {ACTIVE.has(job.status) ? (
           <span className="muted small">Links between saved pages are switched to the copies when it finishes.</span>
+        ) : (
+          <div>
+            <button onClick={async () => (await rerunJob(job)) && load()}>↻ Re-archive</button>
+          </div>
         )}
       </div>
       {groups.map((g) => (

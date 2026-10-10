@@ -4,8 +4,9 @@ import httpx
 import pytest
 
 from app import archive
-from app.archive import (ArchiveError, Page, WebArchiver, fetch_page, file_name, find_categories, html_assets,
-                         link_pages, localize_html, prepare_html, read_navbar)
+from app.archive import (ArchiveError, Page, WebArchiver, _listing_key, fetch_page, file_name, find_categories,
+                         html_assets, is_pagination, link_pages, listing_links, localize_html, looks_like_post,
+                         parse_html, prepare_html, read_navbar)
 from app.main import app
 
 from .test_api import api  # noqa: F401  (fixture)
@@ -25,20 +26,28 @@ HOME = b"""<html><head><title> Site &amp; Co </title><link rel=stylesheet href=/
 <a href="mailto:me@site.test">mail</a></p>
 </body></html>"""
 
+# /news/ and /sport/ are listings: only the posts they list are saved.
 PAGES = {
     "/": HOME,
     "/robots.txt": b"User-agent: *\nDisallow: /news/secret\n",
-    "/news/": b'<title>News</title><header><a href="/sport/">Sport</a></header><a href="/news/a">A</a>'
-              b'<a href="/news/page/2/">2</a><a href="/news/secret">s</a><a href="/story-7.html">Story 7</a>'
-              b'<footer><a href="/privacy">Privacy</a></footer>',
-    "/story-7.html": b'<title>Story 7</title><a href="/news/c">more</a>',
-    "/news/page/2/": b'<title>News 2</title><a href="/news/b">B</a>',
+    "/news/": b'<title>News</title><header><a href="/sport/">Sport</a></header>'
+              b'<h2><a href="/news/a">A</a></h2>'
+              b'<article><a href="/story-7.html">Story 7</a></article>'
+              b'<p><a href="/2026/10/09/big-story">Big</a> <a href="/news/secret-12345">s</a>'
+              b' <a href="/sport/">Sport</a> <a href="/news/world.htm">World</a></p>'
+              b'<aside><h3><a href="/hot-post-99999">Hot</a></h3></aside>'
+              b'<a href="/news/page/2/">2</a><footer><a href="/privacy-policy-of-site">Privacy</a></footer>',
+    "/news/page/2/": b'<title>News 2</title><h2><a href="/news/b">B</a></h2><h2><a href="/news/a">A</a></h2>'
+                     b'<a href="/news/page/3/">3</a>',
+    "/news/page/3/": b'<title>News 3</title><h2><a href="/news/a">A</a></h2><a href="/news/page/4/">4</a>',
     "/news/a": b'<html><head><title>A</title><link rel="stylesheet" href="/s.css"></head><body>'
                b'<a href="/news/b#top">B</a><img src="../img/a.png"><a href="/sport/x">x</a>'
                b'<script>document.write("ad")</script></body></html>',
     "/news/b": b'<title>B</title><a href="a">A</a>',
+    "/story-7.html": b'<title>Story 7</title><a href="/news/c">more</a>',
+    "/2026/10/09/big-story": b'<title>Big</title><a href="/news/a">A</a>',
     "/news/world.htm": b'<title>World</title>',
-    "/sport/": b"<title>Sport</title>",
+    "/sport/": b'<title>Sport</title><h3><a href="/sport/x">X</a></h3>',
     "/sport/x": b"<title>X</title>",
 }
 
@@ -183,60 +192,98 @@ async def test_private_hosts_refused():
             await archive.check_public_host(host)
 
 
-async def test_crawl_picked_categories(pool, tmp_path):
-    arch = _archiver(pool, tmp_path)
+def test_listing_links():
+    page = Page(SITE + "/news/", SITE + "/news/", 200, "text/html", PAGES["/news/"])
+    posts, more = listing_links(page, parse_html(page)[1], "/news/", {_listing_key(SITE + "/news/")})
+    # headline, <article> and post-style links; not menus, header, footer, sidebar or other sections
+    assert posts == [SITE + "/news/a", SITE + "/story-7.html", SITE + "/2026/10/09/big-story",
+                     SITE + "/news/secret-12345"]
+    assert more == [SITE + "/news/page/2/"]
+
+    # most posts under the item's own path: the few from elsewhere are left out
+    body = b"".join(b'<h3><a href="/news/story%d">p</a></h3>' % i for i in range(4)) + b'<h3><a href="/x/y">y</a></h3>'
+    page = Page(SITE + "/news.htm", SITE + "/news.htm", 200, "text/html", body)
+    assert listing_links(page, parse_html(page)[1], "/news/", set())[0] == [SITE + f"/news/story{i}" for i in range(4)]
+
+
+def test_pagination_and_post_urls():
+    for listing, nxt in [("https://vnexpress.net/du-lich", "https://vnexpress.net/du-lich-p2"),
+                         ("https://dantri.com.vn/the-gioi.htm", "https://dantri.com.vn/the-gioi/trang-2.htm"),
+                         ("https://techcrunch.com/category/startups/", "https://techcrunch.com/category/startups/page/2/"),
+                         (SITE + "/blog/", SITE + "/blog/?page=3")]:
+        assert is_pagination(nxt, listing), nxt
+    assert not is_pagination("https://vnexpress.net/the-thao-p2", "https://vnexpress.net/du-lich")
+    assert not is_pagination("https://dantri.com.vn/the-gioi/a-b-nha-trang-20261010075618440.htm",
+                             "https://dantri.com.vn/the-gioi.htm")
+    assert looks_like_post("https://vnexpress.net/ban-ta-phinh-mua-nuoc-ngap-5124736.html")
+    assert looks_like_post("https://techcrunch.com/2026/10/09/some-post/")
+    assert looks_like_post(SITE + "/how-to-make-good-coffee/")
+    assert not looks_like_post(SITE + "/news/") and not looks_like_post(SITE + "/category/tech/")
+
+
+async def test_crawl_saves_posts_only(pool, tmp_path):
+    requested = []
+
+    def handler(req):
+        requested.append(req.url.path)
+        return site_handler(req)
+
+    arch = _archiver(pool, tmp_path, handler)
     found = await arch.discover("site.test/old")  # scheme added, redirect followed
     assert found["url"] == SITE + "/" and found["title"] == "Site & Co"
     news = next(i for i in found["menus"][0]["items"] if i["prefix"] == "/news/")
+    requested.clear()  # count only what the job fetches
 
-    job = await arch.start(found["url"], [news], max_pages=20)
+    job = await arch.start(found["url"], [news], max_pages=20, title=found["title"])
     await arch._tasks[job["id"]]
     row = await pool.fetchrow("SELECT * FROM web_archive_jobs WHERE id = $1", job["id"])
     assert row["status"] == "done" and row["title"] == "Site & Co"
     pages = await pool.fetch("SELECT * FROM web_archive_pages WHERE job_id = $1 ORDER BY id", job["id"])
     saved = [p["url"].removeprefix(SITE) for p in pages if p["file_path"]]
-    # /story-7.html and /sport/x: linked from News pages, so saved, but not crawled on (no /news/c);
-    # not /sport/: only in the menu; not /privacy: footer
-    # articles found on a listing page come before more listing pages
-    assert saved == ["/", "/news/", "/story-7.html", "/news/world.htm", "/news/a", "/sport/x", "/news/b",
-                     "/news/page/2/"]
+    # the posts listed on News and its next page; listing pages and the home page aren't saved
+    assert saved == ["/news/a", "/story-7.html", "/2026/10/09/big-story", "/news/b"]
     assert [(p["url"].removeprefix(SITE), p["error"]) for p in pages if p["error"]] == [
-        ("/news/secret", "blocked by robots.txt")]
-    assert (row["pages_saved"], row["pages_failed"]) == (8, 1)
+        ("/news/secret-12345", "blocked by robots.txt")]
+    assert (row["pages_saved"], row["pages_failed"]) == (4, 1)
+    assert {p["category"] for p in pages} == {"/news/"}
+    # page 3 listed nothing new: no page 4; never the home page, sidebar, footer or other sections
+    assert "/news/page/3/" in requested and "/news/page/4/" not in requested
+    assert not {"/", "/hot-post-99999", "/privacy-policy-of-site", "/sport/", "/news/world.htm"} & set(requested)
 
-    # links between saved pages point to the local copies, the rest to the live site
+    # links between saved posts point to the local copies, the rest to the live site
     files = {p["url"].removeprefix(SITE): p["file_path"] for p in pages if p["file_path"]}
     a = (tmp_path / files["/news/a"]).read_text()
     b_name = files["/news/b"].rsplit("/", 1)[1]
-    assert f'href="{b_name}#top"' in a
-    # the page's look is kept: stylesheet, @imported CSS, font, background and image saved locally
+    assert f'href="{b_name}#top"' in a and 'href="https://site.test/sport/x"' in a
+    big = (tmp_path / files["/2026/10/09/big-story"]).read_text()
+    assert f'href="{files["/news/a"].rsplit("/", 1)[1]}"' in big
+    s7 = (tmp_path / files["/story-7.html"]).read_text()
+    assert 'href="https://site.test/news/c"' in s7  # not archived: points to the live site
+    assert files["/news/a"].startswith(f"web/job{job['id']}/")
+    # the post's look is kept: stylesheet, @imported CSS, font, background and image saved locally
     assets = tmp_path / f"web/job{job['id']}/assets"
-    assert sorted(p.name.rsplit(".", 1)[1] for p in assets.iterdir()) == ["css", "css", "png", "png", "png", "woff2"]
+    assert sorted(p.name.rsplit(".", 1)[1] for p in assets.iterdir()) == ["css", "css", "png", "png", "woff2"]
     main_css = next(p for p in assets.iterdir() if b"@import" in p.read_bytes()).read_text()
     assert main_css.startswith('@import "') and 'url("' in main_css and "site.test" not in main_css
     assert (assets / main_css.split('"')[1]).read_text().count("url(") == 1
     assert 'href="assets/' in a and 'src="assets/' in a and "<script" not in a
     assert '<meta charset="utf-8">' in a
     row = await pool.fetchrow("SELECT assets_saved, assets_bytes, pages_bytes FROM web_archive_jobs WHERE id = $1", job["id"])
-    assert row["assets_saved"] == 6 and row["assets_bytes"] > 0 and row["pages_bytes"] > 0
-    assert (await pool.fetchval("SELECT count(*) FROM web_archive_pages WHERE url LIKE '%/news/c'")) == 0
-    s = (tmp_path / files["/story-7.html"]).read_text()
-    assert 'href="https://site.test/news/c"' in s  # not archived: points to the live site
-    assert files["/news/a"].startswith(f"web/job{job['id']}/")
+    assert row["assets_saved"] == 5 and row["assets_bytes"] > 0 and row["pages_bytes"] > 0
 
 
-async def test_max_pages_and_cancel(pool, tmp_path):
+async def test_max_posts_and_cancel(pool, tmp_path):
     arch = _archiver(pool, tmp_path)
-    cats = [{"prefix": "/news/", "url": SITE + "/news/"}]
-    job = await arch.start(SITE, cats, max_pages=2)
+    news = {"prefix": "/news/", "url": SITE + "/news/"}
+    job = await arch.start(SITE, [news], max_pages=2)
     await arch._tasks[job["id"]]
     assert await pool.fetchval("SELECT pages_saved FROM web_archive_jobs WHERE id = $1", job["id"]) == 2
 
-    # categories take turns: a small limit still gets some of each
-    job = await arch.start(SITE, cats + [{"prefix": "/sport/", "url": SITE + "/sport/"}], max_pages=4)
+    # menu items take turns: a small limit still gets posts from each
+    job = await arch.start(SITE, [news, {"prefix": "/sport/", "url": SITE + "/sport/"}], max_pages=3)
     await arch._tasks[job["id"]]
     pages = await pool.fetch("SELECT url FROM web_archive_pages WHERE job_id = $1 ORDER BY id", job["id"])
-    assert [p["url"].removeprefix(SITE) for p in pages] == ["/", "/news/", "/sport/", "/story-7.html"]
+    assert [p["url"].removeprefix(SITE) for p in pages] == ["/news/a", "/sport/x", "/story-7.html"]
 
     gate = asyncio.Event()
 
@@ -245,7 +292,7 @@ async def test_max_pages_and_cancel(pool, tmp_path):
         return site_handler(req)
 
     arch = _archiver(pool, tmp_path, slow)
-    job = await arch.start(SITE, cats, max_pages=20)
+    job = await arch.start(SITE, [news], max_pages=20)
     await asyncio.sleep(0.05)
     assert await arch.cancel(job["id"])
     await asyncio.gather(arch._tasks[job["id"]], return_exceptions=True)
@@ -262,19 +309,19 @@ async def test_api(api, pool, tmp_path):  # noqa: F811
     assert r.status_code == 200 and r.json()["menus"][0]["items"][0]["label"] == "News"
     assert (await h.post("/api/archive/discover", json={"url": "ftp://x"})).status_code == 400
 
-    r = await h.post("/api/archive/jobs", json={"url": SITE, "categories": [{"prefix": "/sport/"}], "max_pages": 5,
-                                                "save_images": False})
-    assert r.status_code == 202
+    r = await h.post("/api/archive/jobs", json={"url": SITE, "categories": [{"prefix": "/news/"}], "max_pages": 2,
+                                                "save_images": False, "title": "Site & Co"})
+    assert r.status_code == 202 and r.json()["title"] == "Site & Co"
     job_id = r.json()["id"]
     await app.state.archiver._tasks[job_id]
     assert (await h.post("/api/archive/jobs", json={"url": SITE, "categories": []})).status_code == 422
 
     jobs = (await h.get("/api/archive/jobs")).json()
-    assert [(j["id"], j["status"], j["pages_saved"]) for j in jobs] == [(job_id, "done", 3)]  # home, /sport/ and /sport/x (linked from home)
+    assert [(j["id"], j["status"], j["pages_saved"]) for j in jobs] == [(job_id, "done", 2)]
     detail = (await h.get(f"/api/archive/jobs/{job_id}")).json()
-    assert [p["title"] for p in detail["pages"]] == ["Site & Co", "Sport", "X"]
+    assert [p["title"] for p in detail["pages"]] == ["A", "Story 7"]
     folder = tmp_path / "web" / f"job{job_id}"
-    assert len([p for p in folder.iterdir() if p.is_file()]) == 3
+    assert len([p for p in folder.iterdir() if p.is_file()]) == 2
     assert sorted(p.suffix for p in (folder / "assets").iterdir()) == [".css", ".css", ".woff2"]  # no images
 
     assert (await h.delete(f"/api/archive/jobs/{job_id}")).status_code == 200
@@ -285,3 +332,28 @@ async def test_interrupted_on_restart(pool, tmp_path):
     await pool.execute("INSERT INTO web_archive_jobs (url, categories, max_pages, status) VALUES ($1, '[]', 5, 'running')", SITE)
     await _archiver(pool, tmp_path).mark_interrupted()
     assert await pool.fetchval("SELECT status FROM web_archive_jobs") == "interrupted"
+
+
+async def test_rerun_replaces_pages(api, pool, tmp_path):  # noqa: F811
+    app.state.archiver = arch = _archiver(pool, tmp_path)
+    h = api.http
+    job = await arch.start(SITE, [{"prefix": "/sport/", "url": SITE + "/sport/"}], max_pages=5, save_images=False)
+    await arch._tasks[job["id"]]
+    folder = tmp_path / "web" / f"job{job['id']}"
+    stale = folder / "stale_00000000.html"  # e.g. a page the site no longer has
+    stale.write_text("old")
+    old_ids = [p["id"] for p in (await h.get(f"/api/archive/jobs/{job['id']}")).json()["pages"]]
+
+    r = await h.post(f"/api/archive/jobs/{job['id']}/rerun")
+    assert r.status_code == 202 and r.json()["status"] == "queued" and r.json()["pages_saved"] == 0
+    assert r.json()["save_images"] is False and r.json()["categories"][0]["prefix"] == "/sport/"
+    assert (await h.post(f"/api/archive/jobs/{job['id']}/rerun")).status_code == 409  # still running
+    await arch._tasks[job["id"]]
+
+    detail = (await h.get(f"/api/archive/jobs/{job['id']}")).json()
+    assert detail["status"] == "done" and detail["pages_saved"] == 1  # same id, fresh pages
+    assert [p["title"] for p in detail["pages"]] == ["X"]
+    assert not set(old_ids) & {p["id"] for p in detail["pages"]}
+    assert not stale.exists() and all((tmp_path / p["file_path"]).exists() for p in detail["pages"])
+    assert len((await h.get("/api/archive/jobs")).json()) == 1
+    assert (await h.post("/api/archive/jobs/999/rerun")).status_code == 404
