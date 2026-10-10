@@ -872,10 +872,39 @@ class AssetStore:
         self.bytes += len(body)
 
 
+# ---- site icon --------------------------------------------------------------------
+
+_LINK_TAG = re.compile(r"<link\b[^>]*>", re.I)
+ICON_TYPES = {".png", ".ico", ".svg", ".jpg", ".gif", ".webp", ".avif", ".bmp"}
+ICON_MAX_BYTES = 1024 * 1024
+
+
+def site_icons(page: Page) -> list[str]:
+    """The site's icon URLs, best first: large apple-touch/PNG icons, then SVG, then any
+    rel=icon, then /favicon.ico (where browsers look when a page names none)."""
+    text = page.body[:300_000].decode(page_charset(page), errors="replace")
+    ranked = []
+    for i, m in enumerate(_LINK_TAG.finditer(text)):
+        tag = m.group(0)
+        rel = (_attr_value(_attr(tag, "rel")) or "").lower().split()
+        href = _attr_value(_attr(tag, "href"))
+        if not _is_fetchable(href) or not ({"icon", "apple-touch-icon", "apple-touch-icon-precomposed"} & set(rel)):
+            continue
+        sizes = [int(n) for n in re.findall(r"(\d+)x\d+", _attr_value(_attr(tag, "sizes")) or "")]
+        size = max(sizes, default=180 if "apple-touch-icon" in " ".join(rel) else 0)
+        svg = href.lower().split("?")[0].endswith(".svg") or "svg" in (_attr_value(_attr(tag, "type")) or "")
+        # 64-256 px is plenty for a list icon; svg scales; unknown sizes come after
+        score = (2 if 64 <= size <= 256 else 1 if size > 256 or svg else 0, min(size, 256), -i)
+        ranked.append((score, urljoin(page.final_url, href)))
+    urls = [u for _, u in sorted(ranked, reverse=True)]
+    urls.append(urljoin(page.final_url, "/favicon.ico"))
+    return list(dict.fromkeys(urls))
+
+
 # ---- jobs -------------------------------------------------------------------------
 
 JOB_COLS = ("id, url, title, categories, max_pages, save_images, status, pages_saved, pages_failed, "
-            "assets_saved, assets_bytes, pages_bytes, error, created_at, finished_at")
+            "assets_saved, assets_bytes, pages_bytes, error, created_at, finished_at, icon_path")
 
 
 class WebArchiver:
@@ -935,6 +964,7 @@ class WebArchiver:
             row = await conn.fetchrow(
                 "UPDATE web_archive_jobs SET status = 'queued', pages_saved = 0, pages_failed = 0, "
                 "assets_saved = 0, assets_bytes = 0, pages_bytes = 0, error = NULL, created_at = now(), "
+                "icon_path = NULL, icon_checked = false, "
                 f"finished_at = NULL WHERE id = $1 AND status NOT IN ('queued', 'running') RETURNING {JOB_COLS}",
                 job_id,
             )
@@ -1041,6 +1071,7 @@ class WebArchiver:
         async with self.client_factory() as client:
             assets = AssetStore(folder / ASSETS_DIR, client, self.check_host, self._disk_low, job["save_images"])
             robots = await self._robots(client, job["url"])
+            await self._save_icon(client, job_id, job["url"])
             while saved < job["max_pages"] and (item := next_url()):
                 url, prefix, is_listing = item
                 if robots and not robots.can_fetch(ROBOTS_AGENT, url):
@@ -1100,6 +1131,47 @@ class WebArchiver:
         if not saved and not any(posts_found.values()):
             raise ArchiveError("no posts found on the picked menu items' pages (the site may build its "
                                "lists with JavaScript, which the archiver can't run)")
+
+    async def _save_icon(self, client: httpx.AsyncClient, job_id: int, url: str) -> None:
+        """Save the site's icon as job<id>/icon.<ext> for the archive list (best effort)."""
+        try:
+            home = await fetch_page(client, url, check_host=self.check_host)
+            candidates = site_icons(home) if home.is_html else [urljoin(url, "/favicon.ico")]
+        except ArchiveError:
+            candidates = [urljoin(url, "/favicon.ico")]
+        path = None
+        for icon_url in candidates[:4]:
+            try:
+                icon = await fetch_page(client, icon_url, max_bytes=ICON_MAX_BYTES, check_host=self.check_host)
+            except ArchiveError:
+                continue
+            name = asset_name(icon.final_url, icon.content_type)
+            ext = Path(name or "").suffix
+            if ext not in ICON_TYPES or not icon.body:
+                continue
+            if not await self.pool.fetchval("SELECT EXISTS (SELECT 1 FROM web_archive_jobs WHERE id = $1)", job_id):
+                return  # deleted meanwhile: don't leave a folder behind
+            folder = self.media_dir / "web" / f"job{job_id}"
+            folder.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread((folder / f"icon{ext}").write_bytes, icon.body)
+            path = f"web/job{job_id}/icon{ext}"
+            break
+        await self.pool.execute(
+            "UPDATE web_archive_jobs SET icon_path = $2, icon_checked = true WHERE id = $1", job_id, path)
+
+    async def backfill_icons(self) -> None:
+        """Archives made before icons were kept get theirs once (in the background at startup)."""
+        rows = await self.pool.fetch(
+            "SELECT id, url FROM web_archive_jobs WHERE NOT icon_checked AND status NOT IN ('queued', 'running') "
+            "ORDER BY id")
+        if not rows:
+            return
+        async with self.client_factory() as client:
+            for r in rows:
+                try:
+                    await self._save_icon(client, r["id"], r["url"])
+                except Exception:
+                    log.exception("icon for web archive job %s failed", r["id"])
 
     async def _robots(self, client: httpx.AsyncClient, url: str) -> RobotFileParser | None:
         try:

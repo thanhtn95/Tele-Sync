@@ -1647,3 +1647,19 @@ mark.hl {
   border-bottom: 1px solid var(--border);
   overflow-wrap: anywhere;
 }
+.site-icon {
+  flex: none;
+  border-radius: 8px;
+  object-fit: contain;
+  background: var(--bg);
+}
+.site-icon-letter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-weight: 600;
+}
+.archive-job-head .site-icon {
+  margin-bottom: 6px;
+}

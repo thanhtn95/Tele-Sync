@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { api, fileUrl } from '../lib/api.js';
-import { formatAgo, formatSize } from '../lib/format.js';
+import { formatAgo, formatSize, peerColor } from '../lib/format.js';
 
 const ACTIVE = new Set(['queued', 'running']);
 const STATUS = {
@@ -19,6 +19,21 @@ const host = (url) => {
     return url;
   }
 };
+
+/** The site's own icon (saved with the archive), or its first letter until one is found. */
+function SiteIcon({ job, size = 36 }) {
+  const [broken, setBroken] = useState(false);
+  const letter = (job.title || host(job.url)).replace(/^www\./, '').charAt(0).toUpperCase();
+  const style = { width: size, height: size };
+  if (job.icon_path && !broken) {
+    return <img className="site-icon" style={style} src={fileUrl(job.icon_path)} alt="" onError={() => setBroken(true)} />;
+  }
+  return (
+    <span className="site-icon site-icon-letter" style={{ ...style, background: peerColor(job.id) }} aria-hidden="true">
+      {letter}
+    </span>
+  );
+}
 
 /** Re-run `load` every few seconds while `active`. */
 function usePoll(load, active) {
@@ -260,6 +275,7 @@ function JobRow({ job, onChanged }) {
   };
   return (
     <li className="archive-job">
+      <SiteIcon job={job} />
       <a href={`#/archive/${job.id}`} className="archive-job-main">
         <strong>{job.title || host(job.url)}</strong>
         <span className="muted small">
@@ -332,7 +348,8 @@ function JobDetail({ jobId }) {
     .filter((g) => g.prefix !== null || g.pages.length > 0);
   return (
     <>
-      <div className="archive-pick-head">
+      <div className="archive-pick-head archive-job-head">
+        <SiteIcon job={job} size={48} />
         <strong>{job.title || host(job.url)}</strong>
         <a className="small" href={job.url} target="_blank" rel="noreferrer noopener">
           {job.url}

@@ -64,9 +64,11 @@ async def lifespan(app: FastAPI):
     app.state.dialogs_lock = asyncio.Lock()
     app.state.archiver = WebArchiver(pool, settings.media_dir)
     await app.state.archiver.mark_interrupted()
+    icons_task = asyncio.create_task(app.state.archiver.backfill_icons(), name="web-archive-icons")
     try:
         yield
     finally:
+        icons_task.cancel()
         await app.state.archiver.aclose()
         task.cancel()
         try:

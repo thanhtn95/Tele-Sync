@@ -92,6 +92,8 @@ deploy/     e2-micro provisioning, systemd unit, nginx site, Postgres tuning, ba
   (the plain `src`, else a ≤1000 px `srcset` candidate). One page per second, robots.txt
   respected, one job at a time, stops when the disk is almost full; only public http(s)
   hosts are fetched (redirects included). A job interrupted by a restart isn't resumed.
+  Each archive shows the site's own icon in the list (its best `apple-touch-icon` / `rel=icon`,
+  else `/favicon.ico`, saved as `job<id>/icon.*`; archives made before get theirs once at startup).
   *↻ Re-archive* on a finished job runs it again with the same menu items and settings,
   replacing its saved pages and files (same id/link), e.g. to refresh it or to give archives
   made before assets were kept their CSS and images.

@@ -6,14 +6,15 @@ import pytest
 from app import archive
 from app.archive import (ArchiveError, Page, WebArchiver, _listing_key, fetch_page, file_name, find_categories,
                          html_assets, is_pagination, link_pages, listing_links, localize_html, looks_like_post,
-                         parse_html, prepare_html, read_navbar)
+                         parse_html, prepare_html, read_navbar, site_icons)
 from app.main import app
 
 from .test_api import api  # noqa: F401  (fixture)
 
 SITE = "https://site.test"
 
-HOME = b"""<html><head><title> Site &amp; Co </title><link rel=stylesheet href=/s.css></head><body>
+HOME = b"""<html><head><title> Site &amp; Co </title><link rel=stylesheet href=/s.css>
+<link rel="icon" href="/favicon-16.png" sizes="16x16"><link rel="apple-touch-icon" href="/touch.png"></head><body>
 <nav class="main" aria-label="Main"><ul>
   <li><a href="/"><img alt="Home" src="/logo.png"></a>
   <li><a href="/news/">News</a>
@@ -59,6 +60,7 @@ ASSETS = {
     "/img/a.png": ("image/png", b"\x89PNG a"),
     "/img/bg.png": ("image/png", b"\x89PNG bg"),
     "/logo.png": ("image/png", b"\x89PNG logo"),
+    "/touch.png": ("image/png", b"\x89PNG touch"),
 }
 
 
@@ -224,6 +226,16 @@ def test_listing_links_real_page_shapes():
     assert posts == [SITE + f"/blog/post-{i}/" for i in range(4)] + [SITE + "/blog/why-we-moved-our-servers-to-the-moon"]
 
 
+def test_site_icons_best_first():
+    body = (b'<link rel="icon" href="/f16.png" sizes="16x16"><link rel="icon" href="/f.svg" type="image/svg+xml">'
+            b'<link rel="icon" href="/f192.png" sizes="192x192"><link rel="shortcut icon" href="/f.ico">'
+            b'<link rel="apple-touch-icon" href="/touch.png"><link rel="stylesheet" href="/s.css">')
+    page = Page(SITE + "/", SITE + "/", 200, "text/html", body)
+    assert site_icons(page) == [SITE + "/f192.png", SITE + "/touch.png", SITE + "/f.svg", SITE + "/f16.png",
+                                SITE + "/f.ico", SITE + "/favicon.ico"]
+    assert site_icons(Page(SITE + "/", SITE + "/", 200, "text/html", b"<p>no icons</p>")) == [SITE + "/favicon.ico"]
+
+
 def test_pagination_and_post_urls():
     for listing, nxt in [("https://vnexpress.net/du-lich", "https://vnexpress.net/du-lich-p2"),
                          ("https://dantri.com.vn/the-gioi.htm", "https://dantri.com.vn/the-gioi/trang-2.htm"),
@@ -264,9 +276,12 @@ async def test_crawl_saves_posts_only(pool, tmp_path):
         ("/news/secret-12345", "blocked by robots.txt")]
     assert (row["pages_saved"], row["pages_failed"]) == (4, 1)
     assert {p["category"] for p in pages} == {"/news/"}
-    # page 3 listed nothing new: no page 4; never the home page, sidebar, footer or other sections
+    # page 3 listed nothing new: no page 4; never the sidebar, footer or other sections
     assert "/news/page/3/" in requested and "/news/page/4/" not in requested
-    assert not {"/", "/hot-post-99999", "/privacy-policy-of-site", "/sport/", "/news/world.htm"} & set(requested)
+    assert not {"/hot-post-99999", "/privacy-policy-of-site", "/sport/", "/news/world.htm"} & set(requested)
+    assert requested.count("/") == 1  # read once, for the site's icon; not saved
+    icon = await pool.fetchval("SELECT icon_path FROM web_archive_jobs WHERE id = $1", job["id"])
+    assert icon == f"web/job{job['id']}/icon.png" and (tmp_path / icon).read_bytes() == b"\x89PNG touch"
 
     # links between saved posts point to the local copies, the rest to the live site
     files = {p["url"].removeprefix(SITE): p["file_path"] for p in pages if p["file_path"]}
@@ -339,7 +354,8 @@ async def test_api(api, pool, tmp_path):  # noqa: F811
     detail = (await h.get(f"/api/archive/jobs/{job_id}")).json()
     assert [p["title"] for p in detail["pages"]] == ["A", "Story 7"]
     folder = tmp_path / "web" / f"job{job_id}"
-    assert len([p for p in folder.iterdir() if p.is_file()]) == 2
+    assert sorted(p.name.split("_")[0] for p in folder.iterdir() if p.is_file()) == ["icon.png", "news", "story-7"]
+    assert jobs[0]["icon_path"] == f"web/job{job_id}/icon.png"
     assert sorted(p.suffix for p in (folder / "assets").iterdir()) == [".css", ".css", ".woff2"]  # no images
 
     assert (await h.delete(f"/api/archive/jobs/{job_id}")).status_code == 200
@@ -397,3 +413,26 @@ async def test_discover_js_only_site(tmp_path):
         transport=httpx.MockTransport(lambda r: httpx.Response(200, content=body, headers={"content-type": "text/html"}))))
     with pytest.raises(ArchiveError, match="JavaScript"):
         await arch.discover(SITE)
+
+
+async def test_backfill_icons_for_old_archives(pool, tmp_path):
+    def handler(req):
+        if req.url.path == "/favicon.ico":
+            return httpx.Response(200, content=b"\x00\x00\x01\x00ico", headers={"content-type": "image/x-icon"})
+        if req.url.path == "/":
+            return httpx.Response(200, content=b"<title>Old</title>", headers={"content-type": "text/html"})
+        return httpx.Response(404)
+
+    old = await pool.fetchval("INSERT INTO web_archive_jobs (url, categories, max_pages, status) "
+                              "VALUES ($1, '[]', 5, 'done') RETURNING id", SITE + "/")
+    running = await pool.fetchval("INSERT INTO web_archive_jobs (url, categories, max_pages, status) "
+                                  "VALUES ($1, '[]', 5, 'running') RETURNING id", SITE + "/")
+    arch = _archiver(pool, tmp_path, handler)
+    await arch.backfill_icons()
+    rows = {r["id"]: r for r in await pool.fetch("SELECT id, icon_path, icon_checked FROM web_archive_jobs")}
+    assert rows[old]["icon_path"] == f"web/job{old}/icon.ico" and rows[old]["icon_checked"]
+    assert rows[running]["icon_path"] is None and not rows[running]["icon_checked"]  # its crawl does it
+    # looked for once only, even when none was found
+    await pool.execute("UPDATE web_archive_jobs SET icon_path = NULL WHERE id = $1", old)
+    await arch.backfill_icons()
+    assert await pool.fetchval("SELECT icon_path FROM web_archive_jobs WHERE id = $1", old) is None
