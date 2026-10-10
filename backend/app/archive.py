@@ -48,6 +48,8 @@ CATEGORY_WORDS = {"category", "categories", "cat", "c", "tag", "tags", "topic", 
 SKIP_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".ico", ".css", ".js", ".json", ".xml",
             ".mp4", ".mp3", ".zip", ".woff", ".woff2", ".ttf", ".rss", ".atom"}
 NAV_HINT = re.compile(r"nav|menu", re.I)
+_FOOTER_HINT = re.compile(r"footer", re.I)
+_ASIDE_HINT = re.compile(r"sidebar", re.I)
 # Category pages often end in .htm(l)/.php (Dân Trí: /xa-hoi.htm, articles under /xa-hoi/…).
 PAGE_EXT = {".htm", ".html", ".php", ".asp", ".aspx", ".shtml"}
 
@@ -174,10 +176,17 @@ class Link:
     in_heading: bool = False  # inside <h1>-<h4>: how listing pages link their posts
     in_article: bool = False  # inside <article>
     in_aside: bool = False  # sidebar (<aside>, *sidebar*): "most read" boxes and the like
+    in_header: bool = False  # <header>: the site's header, or a post card's (inside <article>)
 
 
 _HEADINGS = {"h1", "h2", "h3", "h4"}
 _VOID = {"br", "img", "input", "meta", "link", "hr", "source", "wbr", "area", "col", "embed"}
+
+
+# A class/id hint (nav, menu, sidebar, footer) only marks an element as page chrome when it
+# holds at most this share of the page's links: wrappers like <body class="site-navigation">
+# or <div class="articles-and-sidebar"> hold nearly all of them and are not chrome.
+HINT_MAX_SHARE = 0.5
 
 
 class _LinkParser(HTMLParser):
@@ -185,13 +194,16 @@ class _LinkParser(HTMLParser):
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.links: list[tuple[str, list[str], dict]] = []
+        self.links: list[tuple[str, list[str], dict, tuple[int, ...]]] = []
         self.title: list[str] = []
         self.next: str | None = None
         self._in_title = False
-        self._stack: list[tuple[str, dict]] = []  # open elements and the contexts they opened
-        self._depth = {"nav": 0, "footer": 0, "heading": 0, "article": 0, "aside": 0}
-        self._a: tuple[str, list[str], dict] | None = None
+        # open elements: (tag, contexts opened by its tag, index of its class/id hint or None)
+        self._stack: list[tuple[str, dict, int | None]] = []
+        self._depth = {"nav": 0, "header": 0, "footer": 0, "heading": 0, "article": 0, "aside": 0}
+        self.hints: list[dict] = []  # {"kinds": set, "links": n}
+        self._open_hints: list[int] = []
+        self._a: tuple[str, list[str], dict, tuple[int, ...]] | None = None
 
     def handle_starttag(self, tag, attrs):
         a = {k: v or "" for k, v in attrs}
@@ -200,19 +212,29 @@ class _LinkParser(HTMLParser):
         if tag == "link" and "next" in a.get("rel", "").lower().split() and a.get("href"):
             self.next = self.next or a["href"]
         if tag == "a" and a.get("href"):
-            self._a = (a["href"], [], {k: v > 0 for k, v in self._depth.items()})
+            for i in self._open_hints:
+                self.hints[i]["links"] += 1
+            self._a = (a["href"], [], {k: v > 0 for k, v in self._depth.items()}, tuple(self._open_hints))
             return
         if tag in _VOID:
             return
-        hint = f"{a.get('class', '')} {a.get('id', '')}"
         opened = {
-            "nav": tag in ("nav", "header") or a.get("role") == "navigation" or bool(NAV_HINT.search(hint)),
-            "footer": tag == "footer" or "footer" in hint,
+            "nav": tag == "nav" or a.get("role") == "navigation",
+            "header": tag == "header",
+            "footer": tag == "footer",
             "heading": tag in _HEADINGS,
             "article": tag == "article",
-            "aside": tag == "aside" or "sidebar" in hint.lower(),
+            "aside": tag == "aside",
         }
-        self._stack.append((tag, opened))
+        hint = f"{a.get('class', '')} {a.get('id', '')}".lower()
+        kinds = {k for k, words in (("nav", NAV_HINT), ("footer", _FOOTER_HINT), ("aside", _ASIDE_HINT))
+                 if words.search(hint)} if tag not in ("html", "body", "main", "article") else set()
+        index = None
+        if kinds:
+            self.hints.append({"kinds": kinds, "links": 0})
+            index = len(self.hints) - 1
+            self._open_hints.append(index)
+        self._stack.append((tag, opened, index))
         for k, v in opened.items():
             self._depth[k] += v
 
@@ -225,11 +247,13 @@ class _LinkParser(HTMLParser):
             self._a = None
             return
         # Close up to the matching tag: <li>/<p> are often left open in real pages.
-        if any(t == tag for t, _ in self._stack):
+        if any(t == tag for t, _, _ in self._stack):
             while self._stack:
-                t, opened = self._stack.pop()
+                t, opened, index = self._stack.pop()
                 for k, v in opened.items():
                     self._depth[k] -= v
+                if index is not None and index in self._open_hints:
+                    self._open_hints.remove(index)
                 if t == tag:
                     break
 
@@ -238,6 +262,16 @@ class _LinkParser(HTMLParser):
             self.title.append(data)
         if self._a:
             self._a[1].append(data)
+
+    def contexts(self, ctx: dict, hint_ids: tuple[int, ...]) -> dict:
+        """A link's contexts, with class/id hints of page-wide wrappers left out."""
+        limit = HINT_MAX_SHARE * max(len(self.links), 1)
+        ctx = dict(ctx)
+        for i in hint_ids:
+            if self.hints[i]["links"] <= limit:
+                for k in self.hints[i]["kinds"]:
+                    ctx[k] = True
+        return ctx
 
 
 def _parse(page: Page) -> _LinkParser:
@@ -254,14 +288,15 @@ def parse_html(page: Page) -> tuple[str | None, list[Link]]:
     """Title and absolute links (fragments dropped) of an HTML page."""
     p = _parse(page)
     links = []
-    for href, text, ctx in p.links:
+    for href, text, raw_ctx, hint_ids in p.links:
+        ctx = p.contexts(raw_ctx, hint_ids)
         href = href.strip()
         if href.startswith(("mailto:", "tel:", "javascript:", "#")):
             continue
         url = urldefrag(urljoin(page.final_url, href))[0]
         if urlsplit(url).scheme in ("http", "https"):
             links.append(Link(url, " ".join(" ".join(text).split())[:120], ctx["nav"], ctx["footer"],
-                              ctx["heading"], ctx["article"], ctx["aside"]))
+                              ctx["heading"], ctx["article"], ctx["aside"], ctx["header"]))
     title = " ".join(" ".join(p.title).split())[:300] or None
     return title, links
 
@@ -423,6 +458,7 @@ _PAGINATION = re.compile(
 _POST_PATH = re.compile(r"/\d{4}/\d{1,2}/")  # /2026/10/09/slug
 _LONG_NUMBER = re.compile(r"\d{5,}")         # -5124736.html, -20261010075618440.htm
 MAX_LISTING_PAGES = 100  # next pages followed per menu item at most
+TITLE_WORDS = 6  # a link whose text is this long reads like a post title
 IN_PREFIX_SHARE = 0.6  # when most of a listing's posts live under its path, keep only those
 
 
@@ -445,6 +481,11 @@ def is_pagination(url: str, listing_url: str) -> bool:
         _listing_key(url) == _listing_key(listing_url))
 
 
+# Links in post cards that aren't posts: author, tag and topic pages, search, accounts.
+NOT_POST_SEGMENTS = {"author", "authors", "tag", "tags", "category", "categories", "topic", "topics", "user",
+                     "users", "profile", "search", "login", "register", "subscribe", "tac-gia", "tim-kiem"}
+
+
 def looks_like_post(url: str) -> bool:
     """Post-style address: a date path, a long id, or a long slug."""
     path = urlsplit(url).path
@@ -454,7 +495,8 @@ def looks_like_post(url: str) -> bool:
 
 def listing_links(page: Page, links: list[Link], prefix: str, listings: set[str]) -> tuple[list[str], list[str]]:
     """(posts, next pages) linked from a listing page. Posts are content links (not menus,
-    header, footer or sidebar) that sit in a headline or <article> or have a post-style address."""
+    header, footer or sidebar) that sit in a headline or <article>, have a post-style address,
+    or read like a title."""
     me = _listing_key(page.final_url)
     posts, pages = [], []
     for link in links:
@@ -464,12 +506,15 @@ def listing_links(page: Page, links: list[Link], prefix: str, listings: set[str]
         if is_pagination(url, page.final_url):
             pages.append(url)
             continue
-        if link.in_nav or link.in_footer or link.in_aside:
+        # menus and sidebars; the site's header/footer (a post card's own header/footer is fine)
+        if link.in_nav or link.in_aside or ((link.in_header or link.in_footer) and not link.in_article):
             continue
         key = _listing_key(url)
         if key == me or key in listings:
             continue  # the listing itself, or another picked menu item
-        if link.in_heading or link.in_article or looks_like_post(url):
+        if {seg.lower() for seg in path.split("/")} & NOT_POST_SEGMENTS:
+            continue
+        if link.in_heading or link.in_article or looks_like_post(url) or len(link.text.split()) >= TITLE_WORDS:
             posts.append(url)
     posts = list(dict.fromkeys(posts))
     inside = [u for u in posts if in_category(u, prefix)]
@@ -488,6 +533,7 @@ def find_categories(page: Page) -> tuple[str | None, list[dict]]:
     for link in links:
         if not same_site(link.url, page.final_url) or link.in_footer:
             continue
+        link.in_nav = link.in_nav or link.in_header
         prefix = category_prefix(link.url)
         if prefix is None:
             continue
@@ -848,7 +894,10 @@ class WebArchiver:
             page = await fetch_page(client, url, check_host=self.check_host)
         if not page.is_html:
             raise ArchiveError("that address is not a web page")
-        title, _ = parse_html(page)
+        title, links = parse_html(page)
+        if not links and b"<script" in page.body.lower():
+            raise ArchiveError("this site only shows its pages to browsers running JavaScript, "
+                               "which the archiver can't do")
         menus = read_navbar(page)
         if not menus:  # no menu found: offer the sections linked from the page instead
             _, cats = find_categories(page)
@@ -971,6 +1020,7 @@ class WebArchiver:
         posts = {c["prefix"]: deque() for c in cats}
         listings = {c["prefix"]: deque([c["url"]]) for c in cats}
         listing_reads = dict.fromkeys(posts, 0)
+        posts_found = dict.fromkeys(posts, 0)
         listing_keys = {_listing_key(c["url"]) for c in cats}
         order = deque(c["prefix"] for c in cats)
         seen = {c["url"] for c in cats}
@@ -1019,6 +1069,7 @@ class WebArchiver:
                         new = [u for u in found if u not in seen]
                         seen.update(new)
                         posts[prefix].extend(new)
+                        posts_found[prefix] += len(new)
                         nxt = _parse(page).next
                         if nxt:
                             more.append(urldefrag(urljoin(page.final_url, nxt))[0])
@@ -1046,6 +1097,9 @@ class WebArchiver:
                 await self._record(job_id, url, prefix, page=page, title=title, size=len(body),
                                    file_path=f"web/job{job_id}/{name}")
                 saved += 1
+        if not saved and not any(posts_found.values()):
+            raise ArchiveError("no posts found on the picked menu items' pages (the site may build its "
+                               "lists with JavaScript, which the archiver can't run)")
 
     async def _robots(self, client: httpx.AsyncClient, url: str) -> RobotFileParser | None:
         try:
